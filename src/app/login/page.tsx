@@ -7,13 +7,19 @@ export const metadata: Metadata = {
   description: "Sign in to view your Ambika Electricals rewards.",
 };
 
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ next?: string; error?: string }>;
+}) {
+  const params = await searchParams;
+
   return (
     <AuthShell
       headline="Welcome back"
       subheadline="Sign in to view your Ambika Electricals rewards."
     >
-      <LoginForm />
+      <LoginForm next={params.next ?? null} error={params.error ?? null} />
     </AuthShell>
   );
 }

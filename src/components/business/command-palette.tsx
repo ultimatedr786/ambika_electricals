@@ -28,10 +28,23 @@ const pages = [
   { href: "/business/settings", label: "Settings", icon: Settings },
 ];
 
-export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+export function CommandPalette({
+  open,
+  onOpenChange,
+  hiddenHrefs = [],
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  /** Role-restricted destinations (owner-only sections) are hidden for managers/staff. */
+  hiddenHrefs?: string[];
+}) {
   const router = useRouter();
   const { state } = useStore();
   const [q, setQ] = React.useState("");
+  const visiblePages = React.useMemo(
+    () => pages.filter((p) => !hiddenHrefs.includes(p.href)),
+    [hiddenHrefs]
+  );
 
   const go = (href: string) => {
     onOpenChange(false);
@@ -108,7 +121,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         )}
 
         <CommandGroup heading="Pages">
-          {pages.map((p) => (
+          {visiblePages.map((p) => (
             <CommandItem key={p.href} value={`page-${p.label}`} onSelect={() => go(p.href)}>
               <p.icon className="size-4 text-muted-foreground" />
               {p.label}

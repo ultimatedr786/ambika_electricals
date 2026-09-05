@@ -8,7 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
-import { Check, ChevronLeft } from "lucide-react";
+import { Check, ChevronLeft, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,6 +17,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { PasswordField, PasswordStrength } from "@/components/shared/password-field";
 import { useServices } from "@/lib/services";
 import { cn } from "@/lib/utils";
+import { createClient } from "@/lib/supabase/client";
+import { getSiteUrl, isSupabaseConfigured } from "@/lib/auth/env";
+import { authErrorMessage } from "@/lib/auth/client-flows";
 
 const schema = z.object({
   businessName: z.string().min(3, "Enter your business name"),
@@ -42,7 +45,25 @@ const stepTitles = ["Your business", "Your details", "Secure your account"];
 export function BusinessSignupForm() {
   const router = useRouter();
   const { authService } = useServices();
+  const supabase = React.useMemo(() => createClient(), []);
+  const realAuth = isSupabaseConfigured() && supabase !== null;
   const [step, setStep] = React.useState(0);
+  const [pendingEmail, setPendingEmail] = React.useState<string | null>(null);
+  const [resendIn, setResendIn] = React.useState(0);
+  const existingSession = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!realAuth || !supabase) return;
+    supabase.auth.getUser().then(({ data }) => {
+      existingSession.current = !!data.user;
+    });
+  }, [realAuth, supabase]);
+
+  React.useEffect(() => {
+    if (resendIn <= 0) return;
+    const t = window.setInterval(() => setResendIn((s) => s - 1), 1000);
+    return () => window.clearInterval(t);
+  }, [resendIn]);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
@@ -58,11 +79,105 @@ export function BusinessSignupForm() {
     if (ok) setStep((s) => s + 1);
   };
 
-  const onSubmit = form.handleSubmit(async () => {
-    await authService.signIn("business");
-    toast.success("Business account created", { description: "Welcome to Rewardly — your dashboard is ready." });
-    router.push("/business/dashboard");
+  const redirectTo = `${getSiteUrl()}/auth/confirm?type=signup&next=%2Fbusiness%2Fdashboard`;
+
+  const onSubmit = form.handleSubmit(async (values) => {
+    if (!realAuth || !supabase) {
+      await authService.signIn("business");
+      toast.success("Business account created", { description: "Welcome to Rewardly — your dashboard is ready." });
+      router.push("/business/dashboard");
+      return;
+    }
+
+    // Already signed in (e.g. routed here from the login page): complete the
+    // business onboarding through the audited, idempotent RPC.
+    if (existingSession.current) {
+      const { error } = await supabase.rpc("complete_business_signup", {
+        p_business_name: values.businessName.trim(),
+        p_legal_name: values.businessName.trim(),
+        p_gstin: values.gst?.trim() || null,
+        p_support_phone: values.phone ? `+91${values.phone.trim()}` : null,
+        p_support_email: values.email.trim().toLowerCase(),
+      });
+      if (error) {
+        toast.error("Couldn't set up your business", { description: authErrorMessage(error, "Please try again.") });
+        return;
+      }
+      toast.success("Business account ready", { description: "Welcome to Rewardly — your dashboard is ready." });
+      router.push("/business/dashboard");
+      router.refresh();
+      return;
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: values.email.trim().toLowerCase(),
+      password: values.password,
+      options: {
+        data: {
+          full_name: values.ownerName.trim(),
+          phone: `+91${values.phone.trim()}`,
+          signup_context: "business",
+          business_name: values.businessName.trim(),
+          business_city: values.city.trim(),
+          gstin: values.gst?.trim() || null,
+        },
+        emailRedirectTo: redirectTo,
+      },
+    });
+
+    if (error) {
+      toast.error("Couldn't create your account", {
+        description: authErrorMessage(error, "Please check your details and try again."),
+      });
+      return;
+    }
+
+    if (data.session) {
+      // Confirmation disabled — the business layout guard completes onboarding.
+      toast.success("Business account created", { description: "Welcome to Rewardly — your dashboard is ready." });
+      router.push("/business/dashboard");
+      router.refresh();
+      return;
+    }
+
+    setPendingEmail(values.email.trim().toLowerCase());
+    setResendIn(60);
   });
+
+  const resendConfirmation = async () => {
+    if (!supabase || !pendingEmail || resendIn > 0) return;
+    setResendIn(60);
+    const { error } = await supabase.auth.resend({ type: "signup", email: pendingEmail, options: { emailRedirectTo: redirectTo } });
+    if (error) toast.error("Couldn't resend the email", { description: authErrorMessage(error, "Please try again shortly.") });
+    else toast.success("Confirmation email resent", { description: `Check ${pendingEmail} — the code lasts 10 minutes.` });
+  };
+
+  if (pendingEmail) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, scale: 0.97 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+        className="rounded-2xl border bg-card p-7 text-center shadow-sm"
+      >
+        <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+          <MailCheck className="size-6" />
+        </div>
+        <h2 className="mt-4 text-xl font-semibold tracking-tight">Confirm your email</h2>
+        <p className="mt-1.5 text-sm text-muted-foreground">
+          If an account exists for <span className="font-medium text-foreground">{pendingEmail}</span>, a confirmation
+          email is on its way. Confirm it and your business workspace is provisioned automatically — business profile,
+          main store and your owner access.
+        </p>
+        <Button size="lg" className="mt-5 w-full" onClick={resendConfirmation} disabled={resendIn > 0}>
+          {resendIn > 0 ? `Resend confirmation email in ${resendIn}s` : "Resend confirmation email"}
+        </Button>
+        <Button asChild variant="ghost" size="sm" className="mt-2 w-full">
+          <Link href="/login">Already confirmed? Sign in</Link>
+        </Button>
+      </motion.div>
+    );
+  }
 
   return (
     <div className="space-y-6">
