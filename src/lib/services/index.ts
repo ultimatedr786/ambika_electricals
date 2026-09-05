@@ -3,12 +3,13 @@
 import * as React from "react";
 import { useStore } from "@/lib/store";
 import { calculatePoints, type CartEntry, tierProgress } from "@/lib/points";
-import { randomCode, sleep } from "@/lib/utils";
+import { randomCode } from "@/lib/utils";
 import { business, tierFor } from "@/lib/mock-data/business";
 import { seriesByRange, type RangeKey } from "@/lib/mock-data/analytics";
+import { eventBus } from "@/lib/events";
 import type {
   Address, Campaign, Customer, Product, Redemption, RedemptionLine, Reward,
-  RewardRedemptionOption, Sale, SaleItem, RewardRule, Challenge, Store, StaffMember,
+  RewardRedemptionOption, Sale, SaleItem, RewardRule, Challenge, Store, StaffMember, AppNotification,
 } from "@/types";
 
 let seq = 10483;
@@ -17,9 +18,8 @@ let rseq = 10842;
 const nextRedemptionId = () => `AE-RWD-${rseq++}`;
 
 /**
- * Frontend-only mock service layer.
- * Phase 2 can swap these implementations for real backend calls
- * without changing a single UI component.
+ * Frontend-only mock service layer with immediate in-memory mutations
+ * and typed event emission.
  */
 export function useServices() {
   const { state, setState } = useStore();
@@ -29,17 +29,26 @@ export function useServices() {
       getProducts: () => state.products,
       getProduct: (id: string) => state.products.find((p) => p.id === id),
       createProduct: async (input: Omit<Product, "id">) => {
-        await sleep(500);
         const product: Product = { ...input, id: `p-${Date.now()}` };
         setState((s) => ({ ...s, products: [product, ...s.products] }));
+        eventBus.emit("product.created", { product });
         return product;
       },
       updateProduct: async (id: string, patch: Partial<Product>) => {
-        await sleep(350);
-        setState((s) => ({ ...s, products: s.products.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
+        let updated: Product | undefined;
+        setState((s) => {
+          const products = s.products.map((p) => {
+            if (p.id === id) {
+              updated = { ...p, ...patch };
+              return updated;
+            }
+            return p;
+          });
+          return { ...s, products };
+        });
+        if (updated) eventBus.emit("product.updated", { product: updated });
       },
       deleteProduct: async (id: string) => {
-        await sleep(250);
         setState((s) => ({ ...s, products: s.products.filter((p) => p.id !== id) }));
       },
     }),
@@ -63,7 +72,6 @@ export function useServices() {
         );
       },
       createCustomer: async (input: Partial<Customer> & { name: string; phone: string; email: string }) => {
-        await sleep(600);
         const customer: Customer = {
           id: `c-${Date.now()}`,
           name: input.name,
@@ -85,11 +93,22 @@ export function useServices() {
           store: "Main Store",
         };
         setState((s) => ({ ...s, customers: [customer, ...s.customers] }));
+        eventBus.emit("customer.created", { customer });
         return customer;
       },
       updateCustomer: async (id: string, patch: Partial<Customer>) => {
-        await sleep(400);
-        setState((s) => ({ ...s, customers: s.customers.map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
+        let updated: Customer | undefined;
+        setState((s) => {
+          const customers = s.customers.map((c) => {
+            if (c.id === id) {
+              updated = { ...c, ...patch };
+              return updated;
+            }
+            return c;
+          });
+          return { ...s, customers };
+        });
+        if (updated) eventBus.emit("customer.updated", { customer: updated });
       },
     }),
     [state.customers, state.currentCustomerId, setState]
@@ -100,7 +119,6 @@ export function useServices() {
       getRewards: () => state.rewards,
       getReward: (id: string) => state.rewards.find((r) => r.id === id),
       createReward: async (input: Omit<Reward, "id" | "redemptions" | "createdAt">) => {
-        await sleep(550);
         const reward: Reward = {
           ...input,
           id: `r-${Date.now()}`,
@@ -111,7 +129,6 @@ export function useServices() {
         return reward;
       },
       updateReward: async (id: string, patch: Partial<Reward>) => {
-        await sleep(300);
         setState((s) => ({ ...s, rewards: s.rewards.map((r) => (r.id === id ? { ...r, ...patch } : r)) }));
       },
       toggleWishlist: (rewardId: string) => {
@@ -167,8 +184,7 @@ export function useServices() {
         return calculatePoints(entries, { tier: customer?.tier });
       },
       createSale: async (params: { customerId: string; entries: CartEntry[]; discount?: number; store?: string; staff?: string }) => {
-        await sleep(900);
-        const customer = state.customers.find((c) => c.id === params.customerId)!;
+        const customer = state.customers.find((c) => c.id === params.customerId) || state.customers[0];
         const breakdown = calculatePoints(params.entries, { tier: customer.tier, discount: params.discount });
         const items: SaleItem[] = params.entries.map((e) => ({
           productId: e.product.id,
@@ -178,6 +194,7 @@ export function useServices() {
           price: e.product.price,
           points: e.product.points * e.qty,
         }));
+        const saleDate = new Date().toISOString();
         const sale: Sale = {
           id: `s-${Date.now()}`,
           invoice: nextInvoice(),
@@ -191,58 +208,79 @@ export function useServices() {
           bonusPoints: breakdown.bonusPoints,
           points: breakdown.totalPoints,
           store: params.store ?? "Main Store",
-          date: new Date().toISOString(),
+          date: saleDate,
           status: "Completed",
           staff: params.staff ?? "Kiran Bhatt",
         };
-        setState((s) => ({
-          ...s,
-          sales: [sale, ...s.sales],
-          products: s.products.map((p) => {
-            const line = params.entries.find((e) => e.product.id === p.id);
-            return line ? { ...p, stock: Math.max(0, p.stock - line.qty) } : p;
-          }),
-          customers: s.customers.map((c) =>
-            c.id === customer.id
-              ? {
-                  ...c,
-                  points: c.points + sale.points,
-                  lifetimePoints: c.lifetimePoints + sale.points,
-                  lifetimeSpend: c.lifetimeSpend + sale.amount,
-                  purchases: c.purchases + 1,
-                  lastPurchase: sale.date,
-                  tier: tierFor(c.lifetimePoints + sale.points).name,
-                }
-              : c
-          ),
-          transactions: [
-            {
-              id: `t-${Date.now()}`,
-              customerId: customer.id,
-              title: "Purchase at Ambika Electricals",
-              subtitle: items.map((i) => `${i.qty} × ${i.name}`).join(", ").slice(0, 90),
-              type: "earned" as const,
-              points: sale.points,
-              date: sale.date,
-              reference: sale.invoice,
-            },
-            ...s.transactions,
-          ],
-          customerNotifications:
-            customer.id === s.currentCustomerId
-              ? [
-                  {
-                    id: `n-${Date.now()}`,
-                    title: `Your purchase earned ${sale.points} points`,
-                    body: `Invoice ${sale.invoice} at Ambika Electricals — ${sale.store}.`,
-                    date: sale.date,
-                    read: false,
-                    kind: "points" as const,
-                  },
-                  ...s.customerNotifications,
-                ]
-              : s.customerNotifications,
-        }));
+
+        const custNotification: AppNotification = {
+          id: `n-${Date.now()}`,
+          title: `Your purchase earned ${sale.points} points`,
+          body: `Invoice ${sale.invoice} at Ambika Electricals — ${sale.store}.`,
+          date: saleDate,
+          read: false,
+          kind: "points",
+        };
+
+        const bizNotification: AppNotification = {
+          id: `n-biz-${Date.now()}`,
+          title: `Sale completed · ₹${sale.amount.toLocaleString("en-IN")}`,
+          body: `${customer.name} earned ${sale.points} points (${sale.invoice}).`,
+          date: saleDate,
+          read: false,
+          kind: "points",
+        };
+
+        let updatedCustomer = customer;
+
+        setState((s) => {
+          const nextCustomers = s.customers.map((c) => {
+            if (c.id === customer.id) {
+              const newLifetime = c.lifetimePoints + sale.points;
+              updatedCustomer = {
+                ...c,
+                points: c.points + sale.points,
+                lifetimePoints: newLifetime,
+                lifetimeSpend: c.lifetimeSpend + sale.amount,
+                purchases: c.purchases + 1,
+                lastPurchase: sale.date,
+                tier: tierFor(newLifetime).name,
+              };
+              return updatedCustomer;
+            }
+            return c;
+          });
+
+          return {
+            ...s,
+            sales: [sale, ...s.sales],
+            products: s.products.map((p) => {
+              const line = params.entries.find((e) => e.product.id === p.id);
+              return line ? { ...p, stock: Math.max(0, p.stock - line.qty) } : p;
+            }),
+            customers: nextCustomers,
+            transactions: [
+              {
+                id: `t-${Date.now()}`,
+                customerId: customer.id,
+                title: "Purchase at Ambika Electricals",
+                subtitle: items.map((i) => `${i.qty} × ${i.name}`).join(", ").slice(0, 90),
+                type: "earned" as const,
+                points: sale.points,
+                date: sale.date,
+                reference: sale.invoice,
+              },
+              ...s.transactions,
+            ],
+            customerNotifications: [custNotification, ...s.customerNotifications],
+            businessNotifications: [bizNotification, ...s.businessNotifications],
+          };
+        });
+
+        eventBus.emit("sale.completed", { sale, points: sale.points, customer: updatedCustomer });
+        eventBus.emit("notification.created", { notification: custNotification, scope: "customer" });
+        eventBus.emit("notification.created", { notification: bizNotification, scope: "business" });
+
         return { sale, breakdown };
       },
     }),
@@ -259,8 +297,7 @@ export function useServices() {
         address?: Address;
         store?: string;
       }) => {
-        await sleep(1100);
-        const customer = state.customers.find((c) => c.id === state.currentCustomerId)!;
+        const customer = state.customers.find((c) => c.id === state.currentCustomerId) || state.customers[0];
         const pointsUsed = params.lines.reduce((s, l) => s + l.option.points * l.qty, 0);
         const cashPaid = params.lines.reduce((s, l) => s + l.option.cash * l.qty, 0);
         const now = new Date();
@@ -281,53 +318,81 @@ export function useServices() {
           createdAt: now.toISOString(),
           expiresAt: expiry.toISOString(),
         };
-        setState((s) => ({
-          ...s,
-          redemptions: [redemption, ...s.redemptions],
-          cart: [],
-          addresses: params.address ? [params.address, ...s.addresses.filter((a) => a.pincode !== params.address!.pincode)] : s.addresses,
-          customers: s.customers.map((c) =>
-            c.id === customer.id
-              ? { ...c, points: c.points - pointsUsed, redeemedPoints: c.redeemedPoints + pointsUsed }
-              : c
-          ),
-          rewards: s.rewards.map((r) => {
-            const line = params.lines.find((l) => l.rewardId === r.id);
-            return line
-              ? { ...r, inventory: Math.max(0, r.inventory - line.qty), redemptions: r.redemptions + line.qty }
-              : r;
-          }),
-          transactions: pointsUsed
-            ? [
-                {
-                  id: `t-${Date.now()}`,
-                  customerId: customer.id,
-                  title: `Redeemed ${params.lines[0].name}${params.lines.length > 1 ? ` +${params.lines.length - 1} more` : ""}`,
-                  subtitle: `Redemption ${redemption.redemptionId}`,
-                  type: "redeemed" as const,
-                  points: -pointsUsed,
-                  date: now.toISOString(),
-                  reference: redemption.redemptionId,
-                },
-                ...s.transactions,
-              ]
-            : s.transactions,
-          customerNotifications: [
-            {
-              id: `n-${Date.now()}`,
-              title: "Reward unlocked 🎉",
-              body: `${params.lines[0].name} — code ${redemption.code}. ${params.fulfilment === "pickup" ? "Ready for pickup at the Main Store." : "Out for delivery soon."}`,
-              date: now.toISOString(),
-              read: false,
-              kind: "reward" as const,
-            },
-            ...s.customerNotifications,
-          ],
-        }));
+
+        const custNotification: AppNotification = {
+          id: `n-${Date.now()}`,
+          title: "Reward unlocked 🎉",
+          body: `${params.lines[0].name} — code ${redemption.code}. ${params.fulfilment === "pickup" ? "Ready for pickup at the Main Store." : "Out for delivery soon."}`,
+          date: now.toISOString(),
+          read: false,
+          kind: "reward",
+        };
+
+        const bizNotification: AppNotification = {
+          id: `n-biz-${Date.now()}`,
+          title: `Reward redeemed · ${customer.name}`,
+          body: `${params.lines[0].name} (${redemption.pointsUsed} pts) — code ${redemption.code}.`,
+          date: now.toISOString(),
+          read: false,
+          kind: "reward",
+        };
+
+        let updatedCustomer = customer;
+
+        setState((s) => {
+          const nextCustomers = s.customers.map((c) => {
+            if (c.id === customer.id) {
+              updatedCustomer = {
+                ...c,
+                points: Math.max(0, c.points - pointsUsed),
+                redeemedPoints: c.redeemedPoints + pointsUsed,
+              };
+              return updatedCustomer;
+            }
+            return c;
+          });
+
+          return {
+            ...s,
+            redemptions: [redemption, ...s.redemptions],
+            cart: [],
+            addresses: params.address
+              ? [params.address, ...s.addresses.filter((a) => a.pincode !== params.address!.pincode)]
+              : s.addresses,
+            customers: nextCustomers,
+            rewards: s.rewards.map((r) => {
+              const line = params.lines.find((l) => l.rewardId === r.id);
+              return line
+                ? { ...r, inventory: Math.max(0, r.inventory - line.qty), redemptions: r.redemptions + line.qty }
+                : r;
+            }),
+            transactions: pointsUsed
+              ? [
+                  {
+                    id: `t-${Date.now()}`,
+                    customerId: customer.id,
+                    title: `Redeemed ${params.lines[0].name}${params.lines.length > 1 ? ` +${params.lines.length - 1} more` : ""}`,
+                    subtitle: `Redemption ${redemption.redemptionId}`,
+                    type: "redeemed" as const,
+                    points: -pointsUsed,
+                    date: now.toISOString(),
+                    reference: redemption.redemptionId,
+                  },
+                  ...s.transactions,
+                ]
+              : s.transactions,
+            customerNotifications: [custNotification, ...s.customerNotifications],
+            businessNotifications: [bizNotification, ...s.businessNotifications],
+          };
+        });
+
+        eventBus.emit("reward.redeemed", { redemption, pointsUsed, customer: updatedCustomer });
+        eventBus.emit("notification.created", { notification: custNotification, scope: "customer" });
+        eventBus.emit("notification.created", { notification: bizNotification, scope: "business" });
+
         return redemption;
       },
       cancelRedemption: async (id: string) => {
-        await sleep(400);
         setState((s) => ({
           ...s,
           redemptions: s.redemptions.map((r) => (r.id === id ? { ...r, status: "Cancelled" as const } : r)),
@@ -341,13 +406,11 @@ export function useServices() {
     () => ({
       getCampaigns: () => state.campaigns,
       createCampaign: async (input: Omit<Campaign, "id" | "reach" | "redemptions" | "revenue">) => {
-        await sleep(700);
         const campaign: Campaign = { ...input, id: `cm-${Date.now()}`, reach: 0, redemptions: 0, revenue: 0 };
         setState((s) => ({ ...s, campaigns: [campaign, ...s.campaigns] }));
         return campaign;
       },
       updateCampaign: async (id: string, patch: Partial<Campaign>) => {
-        await sleep(300);
         setState((s) => ({ ...s, campaigns: s.campaigns.map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
       },
     }),
@@ -383,12 +446,10 @@ export function useServices() {
   const authService = React.useMemo(
     () => ({
       signIn: async (role: "customer" | "business" | "staff") => {
-        await sleep(900);
         setState((s) => ({ ...s, signedIn: true, role }));
       },
       signOut: () => setState((s) => ({ ...s, signedIn: false })),
       signUp: async (input: { name: string; phone: string; email: string; birthday?: string }) => {
-        await sleep(1000);
         const customer = await customerService.createCustomer(input);
         setState((s) => ({ ...s, signedIn: true, role: "customer", currentCustomerId: customer.id, onboarded: false }));
         return customer;
@@ -400,24 +461,33 @@ export function useServices() {
 
   const notificationService = React.useMemo(
     () => ({
-      markRead: (id: string, scope: "customer" | "business" = "customer") =>
+      markRead: (id: string, scope: "customer" | "business" = "customer") => {
+        setState((s) => {
+          const key = scope === "customer" ? "customerNotifications" : "businessNotifications";
+          return {
+            ...s,
+            [key]: s[key].map((n) => (n.id === id ? { ...n, read: true } : n)),
+          };
+        });
+        eventBus.emit("notification.read", { id, scope });
+      },
+      markAllRead: (scope: "customer" | "business" = "customer") => {
+        setState((s) => {
+          const key = scope === "customer" ? "customerNotifications" : "businessNotifications";
+          return {
+            ...s,
+            [key]: s[key].map((n) => ({ ...n, read: true })),
+          };
+        });
+        eventBus.emit("notification.allRead", { scope });
+      },
+      clear: (scope: "customer" | "business" = "customer") => {
         setState((s) => ({
           ...s,
-          [scope === "customer" ? "customerNotifications" : "businessNotifications"]: (scope === "customer"
-            ? s.customerNotifications
-            : s.businessNotifications
-          ).map((n) => (n.id === id ? { ...n, read: true } : n)),
-        })),
-      markAllRead: (scope: "customer" | "business" = "customer") =>
-        setState((s) => ({
-          ...s,
-          [scope === "customer" ? "customerNotifications" : "businessNotifications"]: (scope === "customer"
-            ? s.customerNotifications
-            : s.businessNotifications
-          ).map((n) => ({ ...n, read: true })),
-        })),
-      clear: (scope: "customer" | "business" = "customer") =>
-        setState((s) => ({ ...s, [scope === "customer" ? "customerNotifications" : "businessNotifications"]: [] })),
+          [scope === "customer" ? "customerNotifications" : "businessNotifications"]: [],
+        }));
+        eventBus.emit("notification.cleared", { scope });
+      },
     }),
     [setState]
   );
@@ -426,13 +496,11 @@ export function useServices() {
     () => ({
       getRules: () => state.rules,
       createRule: async (input: Omit<RewardRule, "id">) => {
-        await sleep(500);
         const rule: RewardRule = { ...input, id: `rl-${Date.now()}` };
         setState((s) => ({ ...s, rules: [...s.rules, rule] }));
         return rule;
       },
       updateRule: async (id: string, patch: Partial<RewardRule>) => {
-        await sleep(250);
         setState((s) => ({ ...s, rules: s.rules.map((r) => (r.id === id ? { ...r, ...patch } : r)) }));
       },
       toggleRule: (id: string) =>
@@ -446,13 +514,11 @@ export function useServices() {
     () => ({
       getChallenges: () => state.challenges,
       updateChallenge: async (id: string, patch: Partial<Challenge>) => {
-        await sleep(250);
         setState((s) => ({ ...s, challenges: s.challenges.map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
       },
       createChallenge: async (input: Omit<Challenge, "id">) => {
-        await sleep(500);
         const challenge = { ...input, id: `ch-${Date.now()}` } as Challenge;
-        setState((s) => ({ ...s, challenges: [challenge, ...s.challenges] }));
+        setState((s) => ({ ...s, challenges: [...s.challenges, challenge] }));
         return challenge;
       },
     }),
@@ -463,11 +529,9 @@ export function useServices() {
     () => ({
       getStores: () => state.stores,
       updateStore: async (id: string, patch: Partial<Store>) => {
-        await sleep(250);
         setState((s) => ({ ...s, stores: s.stores.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
       },
       createStore: async (input: Omit<Store, "id">) => {
-        await sleep(500);
         const store = { ...input, id: `st-${Date.now()}` } as Store;
         setState((s) => ({ ...s, stores: [...s.stores, store] }));
         return store;
@@ -480,11 +544,9 @@ export function useServices() {
     () => ({
       getStaff: () => state.staff,
       updateStaff: async (id: string, patch: Partial<StaffMember>) => {
-        await sleep(250);
         setState((s) => ({ ...s, staff: s.staff.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
       },
       createStaff: async (input: Omit<StaffMember, "id">) => {
-        await sleep(500);
         const member = { ...input, id: `sf-${Date.now()}` } as StaffMember;
         setState((s) => ({ ...s, staff: [...s.staff, member] }));
         return member;

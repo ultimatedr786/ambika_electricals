@@ -4,12 +4,15 @@ import { AuthShell } from "@/components/shared/auth-shell";
 
 export const metadata: Metadata = {
   title: "Sign in",
-  description: "Sign in to your Ambika Electricals rewards account.",
+  description: "Sign in to view your Ambika Electricals rewards.",
 };
 
 export default function LoginPage() {
   return (
-    <AuthShell headline="Welcome back." subheadline="Your rewards are waiting.">
+    <AuthShell
+      headline="Welcome back"
+      subheadline="Sign in to view your Ambika Electricals rewards."
+    >
       <LoginForm />
     </AuthShell>
   );

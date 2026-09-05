@@ -4,14 +4,14 @@ import { SignupForm } from "@/components/shared/signup-form";
 
 export const metadata: Metadata = {
   title: "Create account",
-  description: "Join the Ambika Electricals rewards programme and start earning points.",
+  description: "Create your Ambika Electricals membership in minutes.",
 };
 
 export default function SignupPage() {
   return (
     <AuthShell
-      headline="Create your Rewardly account."
-      subheadline="Join Ambika Electricals and start earning rewards."
+      headline="Start earning rewards"
+      subheadline="Create your Ambika Electricals membership in minutes."
     >
       <SignupForm />
     </AuthShell>
