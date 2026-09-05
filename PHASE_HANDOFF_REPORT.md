@@ -41,13 +41,39 @@ manager+ void with mandatory reason) and a **Live points** card on the
 customer dashboard (own-membership balance, lifetime stats, last ledger
 entries).
 
-Proof for both slices: harness **61/61** (S/A/W/R/V + L1–L10 + SA1–SA9,
-`RLS_TEST_RESULTS.md` Runs 2–3); pgTAP mirror at **87 assertions**; tsc/lint
-clean (warnings match pre-existing app-wide idioms), unit tests 8/8. Next:
-Slice 3 inventory (`products`, `inventory_by_store`, append-only
-`inventory_movements`, stock validation + decrement inside `create_sale`,
-server re-pricing from `products` superseding snapshots), then redemptions
-and the rewards catalogue.
+Proof: harness **61/61** (new SA1–SA9, `RLS_TEST_RESULTS.md` Runs 2–3);
+pgTAP mirror at **87 assertions**; tsc/lint clean (warnings match
+pre-existing app-wide idioms), unit tests 8/8, build + 39/39 route smoke.
+
+## ADDENDUM 3 (2026-09-06) — Slice 3 delivered: catalogue + inventory
+
+Item 3 of §4 is **implemented and proven**:
+`supabase/migrations/20260906140000_inventory.sql` adds `products`
+(RPC-only writes, archived-never-deleted, GIN search), `inventory_by_store`
+(the current picture; store-scoped staff see only their stores) and
+append-only `inventory_movements` (double-locked immutability, per-business
+idempotency keys, `balance_after` reconciliation), the internal
+`inventory_move` mover (EXECUTE revoked, like `ledger_post_entry`) and the
+RPCs `create_product` / `update_product` / `receive_stock` / `adjust_stock`
+(all manager+, reason-guarded adjustments, replay-safe). `create_sale` v2
+re-prices catalogue lines server-side (staff overrides refused, manager
+overrides flagged `price_overridden` + audited), validates and decrements
+stock under the proposal's deterministic lock order (balance → inventory by
+product_id → invoice counter), and `void_sale` v2 restocks via compensating
+`sale_void` movements. Seed carries the launch catalogue (6 Ambika products
+mirroring the mock data + 1 Volt product) with opening stock and `initial`
+movements.
+
+Proof: harness **69/69** (new INV1–INV8, `RLS_TEST_RESULTS.md` Run 4); pgTAP
+mirror at **107 assertions** (SA-series identities hardened — no assertion
+depends on leftover claim GUCs). UI landed with the slice: inventory
+management panel on `/business/products` (manager+ create/receive/adjust,
+staff read-only) and the live POS now picks catalogue products (server
+re-prices; manual snapshot lines remain for non-catalogue items).
+
+Next: redemptions + rewards catalogue (`rewards`, `reward_inventory` holds,
+`redeem_reward` spending points through the ledger, collection codes), then
+GST/tax, then the rule engine replacing the launch-policy columns.
 
 ---
 

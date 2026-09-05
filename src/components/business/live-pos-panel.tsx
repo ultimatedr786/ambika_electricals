@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 import {
-  CheckCircle2, IndianRupee, Plus, Receipt, Search, Sparkles, Store, Trash2, UserPlus, UserRound, X,
+  CheckCircle2, IndianRupee, Package, Plus, Receipt, Search, Sparkles, Store, Trash2, UserPlus, UserRound, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -43,9 +43,19 @@ interface MemberHit {
 
 interface CartLine {
   key: number;
+  /** Catalogue-backed lines are re-priced and stock-checked by the RPC. */
+  productId?: string | null;
   name: string;
   qty: string;
   price: string; // rupees, free text
+}
+
+interface CatalogueHit {
+  id: string;
+  sku: string;
+  name: string;
+  pricePaise: number;
+  onHand: number | null;
 }
 
 const PAYMENT_METHODS: { value: LivePaymentMethod; label: string }[] = [
@@ -82,6 +92,11 @@ export function LivePosPanel() {
   const [enrolling, setEnrolling] = React.useState(false);
   const [enrollForm, setEnrollForm] = React.useState({ name: "", phone: "" });
   const [enrollBusy, setEnrollBusy] = React.useState(false);
+
+  // Catalogue picker
+  const [catQuery, setCatQuery] = React.useState("");
+  const [catHits, setCatHits] = React.useState<CatalogueHit[]>([]);
+  const [catSearching, setCatSearching] = React.useState(false);
 
   // Cart
   const [lines, setLines] = React.useState<CartLine[]>([{ key: 1, name: "", qty: "1", price: "" }]);
@@ -175,6 +190,48 @@ export function LivePosPanel() {
     return () => window.clearTimeout(t);
   }, [query, businessId, customer, configured, supabase]);
 
+  // Debounced catalogue search (RLS keeps this to the viewer's business; the
+  // stock figures respect the store-scoped inventory policy).
+  React.useEffect(() => {
+    if (!configured || !supabase || !businessId) return;
+    const q = catQuery.trim();
+    if (q.length < 2) {
+      setCatHits([]);
+      return;
+    }
+    const t = window.setTimeout(async () => {
+      setCatSearching(true);
+      const { data } = await supabase
+        .from("products")
+        .select("id, sku, name, price_paise")
+        .eq("business_id", businessId)
+        .eq("status", "active")
+        .or(`name.ilike.%${q}%,sku.ilike.%${q}%`)
+        .limit(6);
+      const prods = ((data ?? []) as { id: string; sku: string; name: string; price_paise: number }[]);
+      const ids = prods.map((p) => p.id);
+      const { data: inv } = ids.length && storeId
+        ? await supabase.from("inventory_by_store").select("product_id, on_hand").in("product_id", ids).eq("store_id", storeId)
+        : { data: [] };
+      const stock = new Map(((inv ?? []) as { product_id: string; on_hand: number }[]).map((i) => [i.product_id, Number(i.on_hand)]));
+      setCatHits(
+        prods.map((p) => ({
+          id: p.id, sku: p.sku, name: p.name, pricePaise: Number(p.price_paise),
+          onHand: stock.has(p.id) ? stock.get(p.id)! : null,
+        }))
+      );
+      setCatSearching(false);
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [catQuery, businessId, storeId, configured, supabase]);
+
+  const addCatalogueLine = (hit: CatalogueHit) => {
+    const key = lineKey.current++;
+    setLines([...lines, { key, productId: hit.id, name: hit.name, qty: "1", price: (hit.pricePaise / 100).toFixed(2) }]);
+    setCatQuery("");
+    setCatHits([]);
+  };
+
   /* ---- cart math (previews only — the RPC is authoritative) ---- */
   const linePaise = (l: CartLine) => {
     const qty = Number.parseInt(l.qty, 10);
@@ -186,7 +243,7 @@ export function LivePosPanel() {
   const totalPaise = Math.max(subtotalPaise - discountPaise, 0);
   const previewPoints = customer && totalPaise > 0 ? Math.floor((totalPaise * earn.points) / earn.spendPaise) : 0;
 
-  const filledLines = lines.filter((l) => l.name.trim().length > 0 && linePaise(l) > 0);
+  const filledLines = lines.filter((l) => (l.productId || l.name.trim().length > 0) && linePaise(l) > 0);
   const canSubmit =
     !!businessId && !!storeId && !submitting && filledLines.length > 0 && totalPaise > 0;
 
@@ -234,6 +291,7 @@ export function LivePosPanel() {
         storeId,
         customerMembershipId: customer?.id ?? null,
         lines: filledLines.map((l) => ({
+          productId: l.productId ?? null,
           name: l.name.trim(),
           qty: Number.parseInt(l.qty, 10) || 1,
           unitPricePaise: toPaise(l.price),
@@ -323,6 +381,13 @@ export function LivePosPanel() {
             )
           ) : (
             <p className="text-sm text-muted-foreground">Walk-in sale — no points earned.</p>
+          )}
+          {receipt.stockLines > 0 && (
+            <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+              <Package className="size-3.5" aria-hidden />
+              Stock decremented for {receipt.stockLines} catalogue line{receipt.stockLines > 1 ? "s" : ""}
+              {receipt.priceOverrides > 0 && ` · ${receipt.priceOverrides} manager price override${receipt.priceOverrides > 1 ? "s" : ""} (audited)`}
+            </p>
           )}
           {receipt.replayed && (
             <p className="text-xs text-muted-foreground">
@@ -429,6 +494,48 @@ export function LivePosPanel() {
 
             <Separator />
 
+            <div className="space-y-1.5">
+              <Label htmlFor="pos-catalogue">Add from catalogue</Label>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
+                <Input
+                  id="pos-catalogue"
+                  className="pl-8"
+                  placeholder="Search live products by name or SKU — server re-prices and decrements stock"
+                  value={catQuery}
+                  onChange={(e) => setCatQuery(e.target.value)}
+                />
+                {catSearching && (
+                  <span className="absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary" aria-hidden />
+                )}
+              </div>
+              {catHits.length > 0 && (
+                <ul className="space-y-1 rounded-lg border bg-background p-1.5">
+                  {catHits.map((h) => (
+                    <li key={h.id}>
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+                        onClick={() => addCatalogueLine(h)}
+                      >
+                        <Package className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                        <span className="min-w-0 flex-1 truncate font-medium">{h.name}</span>
+                        <span className="font-mono text-[10px] text-muted-foreground">{h.sku}</span>
+                        {h.onHand != null && (
+                          <span className={`text-[10px] ${h.onHand > 0 ? "text-muted-foreground" : "text-destructive"}`}>
+                            {h.onHand} in stock
+                          </span>
+                        )}
+                        <span className="text-xs font-semibold">{formatINR(h.pricePaise / 100)}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <Separator />
+
             <div className="space-y-2">
               {lines.map((l, i) => (
                 <div key={l.key} className="flex items-end gap-2">
@@ -436,8 +543,10 @@ export function LivePosPanel() {
                     {i === 0 && <Label htmlFor={`pos-item-${l.key}`}>Item</Label>}
                     <Input
                       id={`pos-item-${l.key}`}
-                      placeholder="Item name (e.g. LED bulb 9W)"
+                      placeholder="Manual line — item name (e.g. LED bulb 9W)"
                       value={l.name}
+                      disabled={!!l.productId}
+                      title={l.productId ? "Catalogue lines are named and priced by the server" : undefined}
                       onChange={(e) => setLines(lines.map((x) => (x.key === l.key ? { ...x, name: e.target.value } : x)))}
                     />
                   </div>
@@ -457,6 +566,8 @@ export function LivePosPanel() {
                       type="number" min={0} step={0.01}
                       placeholder="0.00"
                       value={l.price}
+                      disabled={!!l.productId && role === "staff"}
+                      title={l.productId ? (role === "staff" ? "Catalogue price — managers can override" : "Editing the catalogue price records an audited manager override") : undefined}
                       onChange={(e) => setLines(lines.map((x) => (x.key === l.key ? { ...x, price: e.target.value } : x)))}
                     />
                   </div>
@@ -480,7 +591,7 @@ export function LivePosPanel() {
                   setLines([...lines, { key, name: "", qty: "1", price: "" }]);
                 }}
               >
-                <Plus /> Add line
+                <Plus /> Add manual line
               </Button>
             </div>
           </div>

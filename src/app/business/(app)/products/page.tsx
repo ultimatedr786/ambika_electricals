@@ -25,6 +25,8 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { ProductArt } from "@/components/shared/product-art";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
+import { LiveInventoryPanel } from "@/components/business/live-inventory-panel";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import { brands, productCategories } from "@/lib/mock-data/products";
 import { cn, formatINR, formatNumber } from "@/lib/utils";
 import type { ProductCategory } from "@/types";
@@ -171,6 +173,18 @@ export default function ProductsPage() {
           </>
         }
       />
+
+      {/* Live Supabase catalogue & stock — renders only when auth is configured */}
+      <LiveInventoryPanel />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype catalogue</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data — migrates in a later slice
+          </span>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2.5">
         <SearchInput value={query} onChange={setQuery} placeholder="Search name, brand or SKU" className="min-w-[220px] flex-1" />

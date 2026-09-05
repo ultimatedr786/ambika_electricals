@@ -153,10 +153,14 @@ async function requireAuthedClient<T = undefined>(): Promise<
 export type LivePaymentMethod = "cash" | "upi" | "card" | "credit" | "other";
 
 export interface SaleLineInput {
+  /** Catalogue-backed lines set this — the RPC then re-prices from `products`
+   *  and validates/decrements stock (Slice 3). Snapshot lines leave it null. */
+  productId?: string | null;
   name: string;
   sku?: string | null;
   qty: number;
-  /** Whole paise only — the RPC recomputes and never trusts these. */
+  /** Whole paise only — the RPC recomputes and never trusts these
+   *  (for catalogue lines a differing price is a manager-only override). */
   unitPricePaise: number;
   lineDiscountPaise?: number;
 }
@@ -188,6 +192,10 @@ export interface SaleOutcome {
   /** Null for walk-ins and replays. */
   balanceAfter: number | null;
   replayed: boolean;
+  /** Catalogue lines whose stock was validated + decremented (Slice 3). */
+  stockLines: number;
+  /** Manager price overrides applied to catalogue lines (Slice 3). */
+  priceOverrides: number;
 }
 
 export async function recordSaleAction(input: RecordSaleInput): Promise<SaleActionResult<SaleOutcome>> {
@@ -198,6 +206,7 @@ export async function recordSaleAction(input: RecordSaleInput): Promise<SaleActi
   const { data, error } = await supabase.rpc("create_sale", {
     p_store_id: input.storeId,
     p_items: input.lines.map((l) => ({
+      product_id: l.productId ?? null,
       name: l.name,
       sku: l.sku ?? null,
       qty: l.qty,
@@ -239,6 +248,8 @@ export async function recordSaleAction(input: RecordSaleInput): Promise<SaleActi
     points?: { base?: number; total?: number };
     balance_after?: number | null;
     replayed?: boolean;
+    stock_lines?: number;
+    price_overrides?: number;
   };
   return {
     ok: true,
@@ -252,6 +263,8 @@ export async function recordSaleAction(input: RecordSaleInput): Promise<SaleActi
       pointsTotal: Number(row.points?.total ?? 0),
       balanceAfter: row.balance_after == null ? null : Number(row.balance_after),
       replayed: Boolean(row.replayed),
+      stockLines: Number(row.stock_lines ?? 0),
+      priceOverrides: Number(row.price_overrides ?? 0),
     },
   };
 }
@@ -265,6 +278,8 @@ export interface VoidSaleOutcome {
   invoiceNo: string;
   pointsReversed: number;
   balanceAfter: number | null;
+  /** Catalogue lines restocked via compensating 'sale_void' movements. */
+  stockLinesRestored: number;
 }
 
 export async function voidSaleAction(saleId: string, reason: string): Promise<SaleActionResult<VoidSaleOutcome>> {
@@ -290,6 +305,7 @@ export async function voidSaleAction(saleId: string, reason: string): Promise<Sa
     invoice_no?: string;
     points_reversed?: number;
     balance_after?: number | null;
+    stock_lines_restored?: number;
   };
   return {
     ok: true,
@@ -298,6 +314,7 @@ export async function voidSaleAction(saleId: string, reason: string): Promise<Sa
       invoiceNo: row.invoice_no ?? "",
       pointsReversed: Number(row.points_reversed ?? 0),
       balanceAfter: row.balance_after == null ? null : Number(row.balance_after),
+      stockLinesRestored: Number(row.stock_lines_restored ?? 0),
     },
   };
 }

@@ -134,11 +134,15 @@ export function LiveSalesPanel() {
         toast.error("Couldn't void the sale", { description: result.message });
         return;
       }
+      const bits: string[] = [];
+      if (result.data.pointsReversed > 0) {
+        bits.push(`${result.data.pointsReversed} points reversed via a compensating ledger entry`);
+      }
+      if (result.data.stockLinesRestored > 0) {
+        bits.push(`${result.data.stockLinesRestored} catalogue line${result.data.stockLinesRestored > 1 ? "s" : ""} restocked`);
+      }
       toast.success(`${result.data.invoiceNo} voided.`, {
-        description:
-          result.data.pointsReversed > 0
-            ? `${result.data.pointsReversed} points reversed via a compensating ledger entry.`
-            : "No points to reverse (walk-in sale).",
+        description: bits.length > 0 ? `${bits.join(" · ")}.` : "No points or stock to reverse.",
       });
       setVoidTarget(null);
       setVoidReason("");
