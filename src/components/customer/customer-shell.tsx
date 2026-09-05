@@ -22,6 +22,7 @@ import { DemoSwitcher } from "@/components/shared/demo-switcher";
 import { NotificationCenter } from "@/components/shared/notification-center";
 import { useCurrentCustomer } from "@/lib/store";
 import { useServices } from "@/lib/services";
+import { usePrefetchOnIntent } from "@/hooks/use-prefetch";
 import { cn, formatNumber, initials } from "@/lib/utils";
 
 const primaryNav = [
@@ -49,6 +50,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const customer = useCurrentCustomer();
   const { authService, cartService } = useServices();
+  const prefetch = usePrefetchOnIntent();
   const [signOutOpen, setSignOutOpen] = React.useState(false);
 
   const cartCount = cartService.count;
@@ -63,13 +65,16 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
         <div className="flex h-16 items-center px-5">
           <Link href="/customer/dashboard" className="rounded-lg"><Logo /></Link>
         </div>
-        <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-2" aria-label="Customer navigation">
+        <nav className="scroll-region flex-1 space-y-0.5 px-3 py-2" aria-label="Customer navigation">
           {desktopNav.map((item) => {
             const active = isActive(item.href);
             return (
               <Link
                 key={item.href}
                 href={item.href}
+                onMouseEnter={() => prefetch(item.href)}
+                onFocus={() => prefetch(item.href)}
+                onTouchStart={() => prefetch(item.href)}
                 aria-current={active ? "page" : undefined}
                 className={cn(
                   "relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
@@ -172,6 +177,9 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
               <li key={item.href}>
                 <Link
                   href={item.href}
+                  onMouseEnter={() => prefetch(item.href)}
+                  onFocus={() => prefetch(item.href)}
+                  onTouchStart={() => prefetch(item.href)}
                   aria-current={active ? "page" : undefined}
                   className={cn(
                     "flex min-h-[52px] flex-col items-center justify-center gap-1 px-1 text-[11px] font-medium transition-colors",

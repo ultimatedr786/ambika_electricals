@@ -9,7 +9,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/shared/stat-card";
 import { StatusBadge } from "@/components/shared/status-badge";
@@ -90,13 +90,19 @@ export default function StoresPage() {
         ))}
       </div>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Add a store</DialogTitle>
-            <DialogDescription>New stores can immediately record sales and issue points.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
+      <FormDialog
+        open={open}
+        onOpenChange={setOpen}
+        title="Add a store"
+        description="New stores can immediately record sales and issue points."
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button onClick={create} loading={saving} disabled={form.name.trim().length < 3}>Add store</Button>
+          </>
+        }
+      >
+          <div className="space-y-4 py-2">
             <Field label="Store name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} placeholder="Ambika Electricals — Katargam" />
             <Field label="Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} placeholder="Shop 8, Krishna Plaza" />
             <div className="grid gap-4 sm:grid-cols-2">
@@ -105,12 +111,7 @@ export default function StoresPage() {
             </div>
             <Field label="Manager" value={form.manager} onChange={(v) => setForm({ ...form, manager: v })} placeholder="Ruchi Shah" />
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={create} loading={saving} disabled={form.name.trim().length < 3}>Add store</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
     </div>
   );
 }

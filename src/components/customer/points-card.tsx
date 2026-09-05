@@ -2,13 +2,13 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Area, AreaChart, ResponsiveContainer, Tooltip as RTooltip, XAxis } from "recharts";
 import { ChevronRight, Info, TrendingUp } from "lucide-react";
 import {
-  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
+  Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from "@/components/ui/sheet";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { PointsTrendChart } from "@/components/charts";
 import { TierBadge } from "@/components/shared/tier-badge";
 import { tierProgress, pointsToRupees } from "@/lib/points";
 import { formatNumber } from "@/lib/utils";
@@ -119,7 +119,7 @@ export function PointsCard({ customer }: { customer: Customer }) {
             <SheetTitle>Your points</SheetTitle>
             <SheetDescription>How your Ambika Electricals balance has moved.</SheetDescription>
           </SheetHeader>
-          <div className="space-y-5 px-5 pb-8">
+          <SheetBody className="space-y-5 pb-8">
             <div className="grid grid-cols-2 gap-3">
               <Stat label="Current points" value={formatNumber(customer.points)} />
               <Stat label="Lifetime points" value={formatNumber(customer.lifetimePoints)} />
@@ -132,23 +132,7 @@ export function PointsCard({ customer }: { customer: Customer }) {
                 <TrendingUp className="size-4 text-primary" /> Balance trend
               </div>
               <div className="h-36">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chart} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
-                    <defs>
-                      <linearGradient id="pts" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.35} />
-                        <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <XAxis dataKey="month" tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" />
-                    <RTooltip
-                      cursor={{ stroke: "hsl(var(--border))" }}
-                      contentStyle={{ borderRadius: 12, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }}
-                      formatter={(v) => [`${formatNumber(Number(v))} pts`, "Balance"]}
-                    />
-                    <Area type="monotone" dataKey="points" stroke="hsl(var(--primary))" strokeWidth={2} fill="url(#pts)" />
-                  </AreaChart>
-                </ResponsiveContainer>
+                <PointsTrendChart data={chart} />
               </div>
             </div>
 
@@ -171,7 +155,7 @@ export function PointsCard({ customer }: { customer: Customer }) {
                 420 points expire on 31 Dec 2026. Redeem them before they lapse.
               </p>
             </div>
-          </div>
+          </SheetBody>
         </SheetContent>
       </Sheet>
     </>

@@ -14,7 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { SearchInput } from "@/components/shared/search-input";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -220,15 +220,19 @@ function RewardDialog({ reward, open, onOpenChange }: { reward: Reward | null; o
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{reward ? "Edit reward" : "Create reward"}</DialogTitle>
-          <DialogDescription>
-            {reward ? "Changes appear instantly in the customer rewards store." : "Publish a new reward to the customer rewards store."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
+    <FormDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={reward ? "Edit reward" : "Create reward"}
+      description={reward ? "Changes appear instantly in the customer rewards store." : "Publish a new reward to the customer rewards store."}
+      footer={
+        <>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={save} loading={saving} disabled={form.name.trim().length < 3}>{reward ? "Save changes" : "Create reward"}</Button>
+        </>
+      }
+    >
+        <div className="space-y-4 py-2">
           <div className="space-y-1.5">
             <Label htmlFor="rname">Reward name</Label>
             <Input id="rname" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Philips 9W LED Bulb — Free" />
@@ -274,11 +278,6 @@ function RewardDialog({ reward, open, onOpenChange }: { reward: Reward | null; o
             <Textarea id="rterms" value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} rows={3} />
           </div>
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={save} loading={saving} disabled={form.name.trim().length < 3}>{reward ? "Save changes" : "Create reward"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    </FormDialog>
   );
 }

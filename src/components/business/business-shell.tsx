@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
@@ -19,13 +20,22 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { DemoSwitcher } from "@/components/shared/demo-switcher";
-import { CommandPalette } from "@/components/business/command-palette";
+/**
+ * cmdk + the palette's icon set are only needed once the user actually opens
+ * search (⌘K / the header button), so the chunk is fetched on first open
+ * instead of shipping with every business route.
+ */
+const CommandPalette = dynamic(
+  () => import("@/components/business/command-palette").then((m) => m.CommandPalette),
+  { ssr: false }
+);
 import { NotificationCenter } from "@/components/business/notification-center";
 import { useServices } from "@/lib/services";
+import { usePrefetchOnIntent } from "@/hooks/use-prefetch";
 import { cn } from "@/lib/utils";
 
 const nav = [
@@ -61,7 +71,11 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { authService } = useServices();
+  const prefetch = usePrefetchOnIntent();
   const [paletteOpen, setPaletteOpen] = React.useState(false);
+  // Keep the palette mounted after its first open so re-opening is instant.
+  const paletteMounted = React.useRef(false);
+  if (paletteOpen) paletteMounted.current = true;
   const [signOutOpen, setSignOutOpen] = React.useState(false);
   const [moreOpen, setMoreOpen] = React.useState(false);
 
@@ -88,7 +102,7 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
         <div className="px-3 pb-2">
           <Button asChild className="w-full"><Link href="/business/sales/new"><Plus /> New Sale</Link></Button>
         </div>
-        <nav className="flex-1 overflow-y-auto px-3 py-2" aria-label="Business navigation">
+        <nav className="scroll-region flex-1 px-3 py-2" aria-label="Business navigation">
           {nav.map((group) => (
             <div key={group.group} className="mb-3">
               <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -101,6 +115,9 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
                     <Link
                       key={item.href}
                       href={item.href}
+                      onMouseEnter={() => prefetch(item.href)}
+                      onFocus={() => prefetch(item.href)}
+                      onTouchStart={() => prefetch(item.href)}
                       aria-current={active ? "page" : undefined}
                       className={cn(
                         "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
@@ -197,6 +214,9 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
               <li key={item.href}>
                 <Link
                   href={item.href}
+                  onMouseEnter={() => prefetch(item.href)}
+                  onFocus={() => prefetch(item.href)}
+                  onTouchStart={() => prefetch(item.href)}
                   aria-current={active ? "page" : undefined}
                   className={cn(
                     "flex min-h-[52px] flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors",
@@ -222,9 +242,9 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
                   More
                 </button>
               </SheetTrigger>
-              <SheetContent side="bottom">
+              <SheetContent side="bottom" className="max-h-[86dvh]">
                 <SheetHeader><SheetTitle>All sections</SheetTitle></SheetHeader>
-                <div className="px-5 pb-8">
+                <SheetBody className="pb-8">
                   {nav.map((g) => (
                     <div key={g.group} className="mb-4">
                       <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{g.group}</p>
@@ -233,6 +253,9 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
                           <Link
                             key={item.href}
                             href={item.href}
+                            onMouseEnter={() => prefetch(item.href)}
+                            onFocus={() => prefetch(item.href)}
+                            onTouchStart={() => prefetch(item.href)}
                             onClick={() => setMoreOpen(false)}
                             className="flex min-h-[48px] items-center gap-2.5 rounded-lg border px-3 text-sm font-medium"
                           >
@@ -246,7 +269,7 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
                   <Link href="/customer/dashboard" onClick={() => setMoreOpen(false)} className="flex min-h-[48px] items-center gap-2.5 rounded-lg border px-3 text-sm font-medium">
                     <Zap className="size-4 text-muted-foreground" /> View customer app
                   </Link>
-                </div>
+                </SheetBody>
               </SheetContent>
             </Sheet>
           </li>
@@ -264,7 +287,7 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
         </Button>
       )}
 
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      {paletteMounted.current && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />}
       <ConfirmDialog
         open={signOutOpen}
         onOpenChange={setSignOutOpen}

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Gift, Lightbulb, Target, TrendingUp, Users, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger, SheetClose,
+  Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger, SheetClose,
 } from "@/components/ui/sheet";
 
 const ways = [
@@ -25,7 +25,7 @@ export function WaysToEarnSheet({ trigger }: { trigger: React.ReactNode }) {
           <SheetTitle>Earn more points</SheetTitle>
           <SheetDescription>Simple ways to build your balance at Ambika Electricals.</SheetDescription>
         </SheetHeader>
-        <div className="space-y-2 px-5 pb-8">
+        <SheetBody className="space-y-2 pb-8">
           {ways.map((w) => (
             <div key={w.title} className="flex items-center gap-3.5 rounded-xl border p-3.5">
               <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -42,7 +42,7 @@ export function WaysToEarnSheet({ trigger }: { trigger: React.ReactNode }) {
               <Link href="/customer/challenges"><Gift /> Start Earning</Link>
             </Button>
           </SheetClose>
-        </div>
+        </SheetBody>
       </SheetContent>
     </Sheet>
   );

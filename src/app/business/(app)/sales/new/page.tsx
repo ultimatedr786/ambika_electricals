@@ -10,13 +10,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { SearchInput } from "@/components/shared/search-input";
 import { TierBadge } from "@/components/shared/tier-badge";
@@ -31,6 +29,20 @@ import { productCategories } from "@/lib/mock-data/products";
 import { cn, formatINR, formatNumber, initials } from "@/lib/utils";
 import type { Customer, Product, Sale } from "@/types";
 
+/**
+ * Point of sale — scroll architecture (Phase 1.3)
+ *
+ * The page itself is always the fallback scroll path; nothing above it sets
+ * `overflow: hidden`. Only two elements ever own a nested scroll, and both are
+ * desktop-only, where a second scroll region is genuinely useful:
+ *
+ *   • the product catalogue grid  (lg+, bounded height beside the cart)
+ *   • the desktop cart lines      (lg+, inside the sticky cart column)
+ *
+ * Below `lg` — every phone, every portrait tablet — the screen is one single
+ * vertical flow: customer → products → cart → totals, with a sticky summary
+ * bar that only ever covers the page's bottom padding.
+ */
 export default function NewSalePage() {
   const { state } = useStore();
   const { salesService } = useServices();
@@ -46,6 +58,7 @@ export default function NewSalePage() {
   const [query, setQuery] = React.useState("");
   const [discount, setDiscount] = React.useState(0);
 
+  const cartSectionRef = React.useRef<HTMLDivElement>(null);
   const demoCustomer = state.customers[0];
 
   const entries = React.useMemo(
@@ -110,106 +123,107 @@ export default function NewSalePage() {
 
   const cartCount = entries.reduce((s, e) => s + e.qty, 0);
 
-  const cartPanel = (
-    <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-2.5 overflow-y-auto">
-        {entries.length === 0 ? (
-          <EmptyState icon={ShoppingCart} title="Cart is empty" description="Add electrical products to build the sale." className="py-10" />
-        ) : (
-          <AnimatePresence initial={false}>
-            {entries.map((e) => (
-              <motion.div
-                key={e.product.id}
-                layout
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, x: -16 }}
-                className="flex items-center gap-3 rounded-lg border p-2.5"
-              >
-                <ProductArt art={e.product.image} className="size-11 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-medium">{e.product.name}</p>
-                  <p className="text-xs tabular text-muted-foreground">
-                    {formatINR(e.product.price)} × {e.qty} = {formatINR(e.product.price * e.qty)}
-                  </p>
-                  <p className="text-xs tabular text-success">+{e.product.points * e.qty} pts</p>
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button variant="outline" size="icon-sm" onClick={() => setQty(e.product.id, e.qty - 1)} aria-label={`Reduce ${e.product.name}`}>
-                    {e.qty === 1 ? <Trash2 /> : <Minus />}
-                  </Button>
-                  <span className="w-7 text-center text-sm font-semibold tabular">{e.qty}</span>
-                  <Button variant="outline" size="icon-sm" onClick={() => setQty(e.product.id, e.qty + 1)} aria-label={`Add ${e.product.name}`}>
-                    <Plus />
-                  </Button>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        )}
+  /* ----------------------------------------------------------- cart pieces */
+
+  const cartLines = (
+    <div className="space-y-2.5">
+      {entries.length === 0 ? (
+        <EmptyState icon={ShoppingCart} title="Cart is empty" description="Add electrical products to build the sale." className="py-8" />
+      ) : (
+        <AnimatePresence initial={false}>
+          {entries.map((e) => (
+            <motion.div
+              key={e.product.id}
+              layout
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, x: -16 }}
+              className="flex items-center gap-3 rounded-lg border p-2.5"
+            >
+              <ProductArt art={e.product.image} className="size-11 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-medium">{e.product.name}</p>
+                <p className="text-xs tabular text-muted-foreground">
+                  {formatINR(e.product.price)} × {e.qty} = {formatINR(e.product.price * e.qty)}
+                </p>
+                <p className="text-xs tabular text-success">+{e.product.points * e.qty} pts</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <Button variant="outline" size="icon-sm" onClick={() => setQty(e.product.id, e.qty - 1)} aria-label={`Reduce ${e.product.name}`}>
+                  {e.qty === 1 ? <Trash2 /> : <Minus />}
+                </Button>
+                <span className="w-7 text-center text-sm font-semibold tabular">{e.qty}</span>
+                <Button variant="outline" size="icon-sm" onClick={() => setQty(e.product.id, e.qty + 1)} aria-label={`Add ${e.product.name}`}>
+                  <Plus />
+                </Button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      )}
+    </div>
+  );
+
+  const cartTotals = entries.length > 0 && (
+    <div className="space-y-3 border-t pt-4">
+      <div className="flex items-center justify-between gap-3">
+        <label htmlFor="discount" className="text-sm text-muted-foreground">Discount</label>
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm text-muted-foreground">₹</span>
+          <Input
+            id="discount"
+            inputMode="numeric"
+            value={discount || ""}
+            placeholder="0"
+            onChange={(e) => setDiscount(Math.max(0, Math.min(breakdown.subtotal, Number(e.target.value.replace(/\D/g, "")) || 0)))}
+            className="h-9 w-24 text-right"
+          />
+        </div>
+      </div>
+      <Separator />
+      <Row label="Subtotal" value={formatINR(breakdown.subtotal)} />
+      {discount > 0 && <Row label="Discount" value={`− ${formatINR(discount)}`} />}
+      <Row label="Amount payable" value={formatINR(breakdown.total)} strong />
+
+      <div className="rounded-xl border bg-accent/40 p-3.5">
+        <p className="flex items-center gap-1.5 text-[13px] font-medium">
+          <Zap className="size-3.5 text-primary" aria-hidden /> Reward points
+        </p>
+        <div className="mt-2 space-y-1 text-[13px]">
+          <Row label="Base points" value={`+${formatNumber(breakdown.basePoints)}`} small />
+          {breakdown.bonuses.map((b) => (
+            <Row key={b.label} label={b.label} value={`+${formatNumber(b.points)}`} small tone="success" />
+          ))}
+          <Separator className="my-1.5" />
+          <div className="flex items-center justify-between">
+            <span className="font-medium">Total points</span>
+            <motion.span
+              key={breakdown.totalPoints}
+              initial={{ scale: 1.15, color: "hsl(var(--success))" }}
+              animate={{ scale: 1 }}
+              className="text-lg font-semibold tabular text-primary"
+            >
+              {formatNumber(breakdown.totalPoints)}
+            </motion.span>
+          </div>
+        </div>
       </div>
 
-      {entries.length > 0 && (
-        <div className="mt-4 space-y-3 border-t pt-4">
-          <div className="flex items-center justify-between gap-3">
-            <label htmlFor="discount" className="text-sm text-muted-foreground">Discount</label>
-            <div className="flex items-center gap-1.5">
-              <span className="text-sm text-muted-foreground">₹</span>
-              <Input
-                id="discount"
-                inputMode="numeric"
-                value={discount || ""}
-                placeholder="0"
-                onChange={(e) => setDiscount(Math.max(0, Math.min(breakdown.subtotal, Number(e.target.value.replace(/\D/g, "")) || 0)))}
-                className="h-8 w-24 text-right"
-              />
-            </div>
-          </div>
-          <Separator />
-          <Row label="Subtotal" value={formatINR(breakdown.subtotal)} />
-          {discount > 0 && <Row label="Discount" value={`− ${formatINR(discount)}`} />}
-          <Row label="Amount payable" value={formatINR(breakdown.total)} strong />
-
-          {/* Live points */}
-          <div className="rounded-xl border bg-accent/40 p-3.5">
-            <p className="flex items-center gap-1.5 text-[13px] font-medium">
-              <Zap className="size-3.5 text-primary" /> Reward points
-            </p>
-            <div className="mt-2 space-y-1 text-[13px]">
-              <Row label="Base points" value={`+${formatNumber(breakdown.basePoints)}`} small />
-              {breakdown.bonuses.map((b) => (
-                <Row key={b.label} label={b.label} value={`+${formatNumber(b.points)}`} small tone="success" />
-              ))}
-              <Separator className="my-1.5" />
-              <div className="flex items-center justify-between">
-                <span className="font-medium">Total points</span>
-                <motion.span
-                  key={breakdown.totalPoints}
-                  initial={{ scale: 1.15, color: "hsl(var(--success))" }}
-                  animate={{ scale: 1 }}
-                  className="text-lg font-semibold tabular text-primary"
-                >
-                  {formatNumber(breakdown.totalPoints)}
-                </motion.span>
-              </div>
-            </div>
-          </div>
-
-          <Button size="lg" className="w-full" disabled={!customer} onClick={() => setConfirmOpen(true)}>
-            <Check /> Complete Sale
-          </Button>
-          {!customer && (
-            <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-              <CircleAlert className="size-3.5" /> Identify a customer to complete the sale
-            </p>
-          )}
-        </div>
+      <Button size="lg" className="w-full" disabled={!customer} onClick={() => setConfirmOpen(true)}>
+        <Check /> Complete Sale
+      </Button>
+      {!customer && (
+        <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+          <CircleAlert className="size-3.5" aria-hidden /> Identify a customer to complete the sale
+        </p>
       )}
     </div>
   );
 
   return (
-    <div className="space-y-5 pb-32 lg:pb-0">
+    // Bottom padding clears the sticky summary bar + the mobile tab bar,
+    // so the sticky bar never covers cart rows or page content.
+    <div className="space-y-5 pb-[186px] lg:pb-0">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Point of sale</p>
@@ -218,34 +232,36 @@ export default function NewSalePage() {
         <Button variant="ghost" size="sm" asChild><Link href="/business/sales"><X /> Cancel</Link></Button>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
-        <div className="space-y-5">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="min-w-0 space-y-5">
           {/* Step 1 — customer */}
-          <Card className="p-5">
+          <Card className="p-4 sm:p-5">
             <StepHeader n={1} title="Identify customer" done={!!customer} />
             <AnimatePresence mode="wait">
               {customer ? (
-                <motion.div key="picked" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="mt-4 flex items-center gap-3 rounded-xl border border-success/30 bg-success/[0.05] p-3.5">
+                <motion.div key="picked" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-success/30 bg-success/[0.05] p-3.5">
                   <Avatar className="size-10"><AvatarFallback>{initials(customer.name)}</AvatarFallback></Avatar>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-semibold">{customer.name}</p>
-                    <p className="text-xs tabular text-muted-foreground">{customer.membershipId} · {customer.phone}</p>
+                    <p className="truncate text-xs tabular text-muted-foreground">{customer.membershipId} · {customer.phone}</p>
                   </div>
-                  <div className="hidden shrink-0 text-right sm:block">
-                    <TierBadge tier={customer.tier} />
-                    <p className="mt-1 text-xs tabular text-muted-foreground">{formatNumber(customer.points)} pts</p>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <div className="text-right">
+                      <TierBadge tier={customer.tier} />
+                      <p className="mt-1 text-xs tabular text-muted-foreground">{formatNumber(customer.points)} pts</p>
+                    </div>
+                    <Button variant="ghost" size="icon-sm" onClick={() => setCustomer(null)} aria-label="Change customer"><X /></Button>
                   </div>
-                  <Button variant="ghost" size="icon-sm" onClick={() => setCustomer(null)} aria-label="Change customer"><X /></Button>
                 </motion.div>
               ) : (
                 <motion.div key="pick" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4 grid gap-2.5 sm:grid-cols-2">
                   <Button size="lg" className="h-auto flex-col gap-1.5 py-4" onClick={() => setScannerOpen(true)}>
-                    <QrCode className="!size-5" />
+                    <QrCode className="!size-5" aria-hidden />
                     <span>Scan Customer QR</span>
                     <span className="text-[11px] font-normal opacity-80">Fastest way at the counter</span>
                   </Button>
                   <Button size="lg" variant="outline" className="h-auto flex-col gap-1.5 py-4" onClick={() => setSelectorOpen(true)}>
-                    <Search className="!size-5" />
+                    <Search className="!size-5" aria-hidden />
                     <span>Select Customer</span>
                     <span className="text-[11px] font-normal text-muted-foreground">Name, phone or member ID</span>
                   </Button>
@@ -255,11 +271,11 @@ export default function NewSalePage() {
           </Card>
 
           {/* Step 2 — products */}
-          <Card className="p-5">
+          <Card className="p-4 sm:p-5">
             <StepHeader n={2} title="Add electrical products" done={entries.length > 0} />
             <div className="mt-4 space-y-3">
               <SearchInput value={query} onChange={setQuery} placeholder="Search product, brand or SKU" />
-              <div className="-mx-1 overflow-x-auto px-1 no-scrollbar">
+              <div className="scroll-region-x -mx-1 px-1 no-scrollbar">
                 <div className="flex w-max gap-2 pb-1">
                   {["All", ...productCategories].map((c) => (
                     <button
@@ -267,7 +283,7 @@ export default function NewSalePage() {
                       onClick={() => setCategory(c)}
                       aria-pressed={category === c}
                       className={cn(
-                        "min-h-[34px] whitespace-nowrap rounded-full border px-3 text-[13px] font-medium transition-colors",
+                        "min-h-[36px] whitespace-nowrap rounded-full border px-3 text-[13px] font-medium transition-colors",
                         category === c ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
                       )}
                     >
@@ -280,7 +296,9 @@ export default function NewSalePage() {
               {filtered.length === 0 ? (
                 <EmptyState icon={Search} title="No products found" description="Try another product name, brand or SKU." className="py-10" />
               ) : (
-                <div className="grid max-h-[540px] grid-cols-2 gap-2.5 overflow-y-auto pr-1 md:grid-cols-3 xl:grid-cols-4">
+                // Nested scrolling only on lg+, where the cart sits alongside.
+                // Below lg the grid grows and the page scrolls normally.
+                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:max-h-[540px] lg:overflow-y-auto lg:overscroll-contain lg:pr-1 xl:grid-cols-4">
                   {filtered.map((p) => {
                     const qty = cart[p.id] ?? 0;
                     return (
@@ -288,6 +306,7 @@ export default function NewSalePage() {
                         key={p.id}
                         onClick={() => add(p.id)}
                         disabled={p.stock === 0}
+                        aria-label={`Add ${p.brand} ${p.name}, ${formatINR(p.price)}`}
                         className={cn(
                           "flex flex-col overflow-hidden rounded-xl border text-left transition-all hover:-translate-y-0.5 hover:shadow-md disabled:opacity-50 disabled:hover:translate-y-0",
                           qty > 0 && "border-primary ring-1 ring-primary"
@@ -317,38 +336,43 @@ export default function NewSalePage() {
               )}
             </div>
           </Card>
+
+          {/* Step 3 — cart, inline on mobile / portrait so the whole sale is one flow */}
+          <Card ref={cartSectionRef} className="p-4 sm:p-5 lg:hidden" id="sale-cart">
+            <StepHeader n={3} title="Cart & rewards" done={entries.length > 0 && !!customer} />
+            <div className="mt-4 space-y-4">
+              {cartLines}
+              {cartTotals}
+            </div>
+          </Card>
         </div>
 
-        {/* Desktop cart */}
+        {/* Desktop cart — its own scroll owner, header and totals stay put */}
         <aside className="hidden lg:block">
           <Card className="sticky top-24 flex max-h-[calc(100dvh-8rem)] flex-col p-5">
-            <StepHeader n={3} title="Cart & rewards" done={entries.length > 0 && !!customer} />
-            <div className="mt-4 flex min-h-0 flex-1 flex-col">{cartPanel}</div>
+            <div className="shrink-0">
+              <StepHeader n={3} title="Cart & rewards" done={entries.length > 0 && !!customer} />
+            </div>
+            <div className="scroll-region mt-4 min-h-0 flex-1">{cartLines}</div>
+            {cartTotals && <div className="mt-4 shrink-0">{cartTotals}</div>}
           </Card>
         </aside>
       </div>
 
-      {/* Mobile sticky summary */}
+      {/* Mobile sticky summary — never overlaps content thanks to the page padding */}
       <div className="fixed inset-x-0 bottom-[62px] z-20 border-t bg-background/95 p-3 backdrop-blur-md lg:hidden">
         <div className="safe-bottom flex items-center gap-3">
-          <div className="min-w-0">
+          <button
+            type="button"
+            onClick={() => cartSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            className="min-w-0 rounded-lg px-1 text-left"
+          >
             <p className="text-[17px] font-semibold tabular">{formatINR(breakdown.total)}</p>
-            <p className="text-[11px] tabular text-muted-foreground">
+            <p className="flex items-center gap-1 text-[11px] tabular text-muted-foreground">
+              <ShoppingCart className="size-3" aria-hidden />
               {formatNumber(breakdown.totalPoints)} points · {cartCount} {cartCount === 1 ? "item" : "items"}
             </p>
-          </div>
-          <Sheet>
-            <SheetTrigger asChild>
-              <Button variant="outline" size="lg" className="relative" aria-label="View cart">
-                <ShoppingCart />
-                {cartCount > 0 && <Badge className="ml-1">{cartCount}</Badge>}
-              </Button>
-            </SheetTrigger>
-            <SheetContent side="bottom" className="max-h-[85vh]">
-              <SheetHeader><SheetTitle>Cart &amp; rewards</SheetTitle></SheetHeader>
-              <div className="px-5 pb-8">{cartPanel}</div>
-            </SheetContent>
-          </Sheet>
+          </button>
           <Button
             size="lg"
             className="flex-1"
@@ -370,32 +394,34 @@ export default function NewSalePage() {
             <DialogTitle>Confirm sale</DialogTitle>
             <DialogDescription>Check the details before completing this sale.</DialogDescription>
           </DialogHeader>
-          {customer && (
-            <div className="space-y-4">
-              <div className="flex items-center gap-3 rounded-xl border p-3.5">
-                <Avatar className="size-9"><AvatarFallback>{initials(customer.name)}</AvatarFallback></Avatar>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{customer.name}</p>
-                  <p className="text-xs tabular text-muted-foreground">{customer.membershipId}</p>
-                </div>
-                <TierBadge tier={customer.tier} />
-              </div>
-              <div className="max-h-40 space-y-1.5 overflow-y-auto text-sm">
-                {entries.map((e) => (
-                  <div key={e.product.id} className="flex justify-between gap-3">
-                    <span className="truncate text-muted-foreground">{e.qty} × {e.product.name}</span>
-                    <span className="shrink-0 tabular">{formatINR(e.product.price * e.qty)}</span>
+          <DialogBody>
+            {customer && (
+              <div className="space-y-4 pb-2">
+                <div className="flex items-center gap-3 rounded-xl border p-3.5">
+                  <Avatar className="size-9"><AvatarFallback>{initials(customer.name)}</AvatarFallback></Avatar>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{customer.name}</p>
+                    <p className="text-xs tabular text-muted-foreground">{customer.membershipId}</p>
                   </div>
-                ))}
+                  <TierBadge tier={customer.tier} />
+                </div>
+                <div className="space-y-1.5 text-sm">
+                  {entries.map((e) => (
+                    <div key={e.product.id} className="flex justify-between gap-3">
+                      <span className="truncate text-muted-foreground">{e.qty} × {e.product.name}</span>
+                      <span className="shrink-0 tabular">{formatINR(e.product.price * e.qty)}</span>
+                    </div>
+                  ))}
+                </div>
+                <Separator />
+                <div className="space-y-1.5 text-sm">
+                  <Row label="Amount" value={formatINR(breakdown.total)} strong />
+                  <Row label="Points earned" value={`+${formatNumber(breakdown.totalPoints)}`} tone="success" strong />
+                  <Row label="New balance" value={`${formatNumber(customer.points + breakdown.totalPoints)} pts`} />
+                </div>
               </div>
-              <Separator />
-              <div className="space-y-1.5 text-sm">
-                <Row label="Amount" value={formatINR(breakdown.total)} strong />
-                <Row label="Points earned" value={`+${formatNumber(breakdown.totalPoints)}`} tone="success" strong />
-                <Row label="New balance" value={`${formatNumber(customer.points + breakdown.totalPoints)} pts`} />
-              </div>
-            </div>
-          )}
+            )}
+          </DialogBody>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>Back</Button>
             <Button onClick={complete} loading={submitting}>Confirm Sale</Button>
@@ -437,7 +463,7 @@ function SaleSuccess({ sale, points, onNew }: { sale: Sale; points: number; onNe
             <Row label="Amount" value={formatINR(sale.amount)} strong />
             <Row label="Store" value={`Ambika Electricals — ${sale.store}`} />
           </div>
-          <div className="flex gap-2 border-t p-4">
+          <div className="flex flex-col gap-2 border-t p-4 sm:flex-row">
             <Button className="flex-1" onClick={onNew}><Plus /> New Sale</Button>
             <Button asChild variant="outline" className="flex-1">
               <Link href={`/business/customers/${sale.customerId}`}><UserRound /> View Customer</Link>

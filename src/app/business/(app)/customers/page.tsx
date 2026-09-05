@@ -15,8 +15,8 @@ import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { SearchInput } from "@/components/shared/search-input";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -142,14 +142,24 @@ export default function CustomersPage() {
         title="Customers"
         description="Every member enrolled in the Ambika Electricals rewards programme."
         actions={
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild><Button><Plus /> Add Customer</Button></DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Enrol a new member</DialogTitle>
-                <DialogDescription>New members start at Bronze with 100 welcome points.</DialogDescription>
-              </DialogHeader>
-              <form onSubmit={submit} className="space-y-4" noValidate>
+          <Button onClick={() => setOpen(true)}><Plus /> Add Customer</Button>
+        }
+      />
+
+      <FormDialog
+        open={open}
+        onOpenChange={setOpen}
+        title="Enrol a new member"
+        description="New members start at Bronze with 100 welcome points."
+        onSubmit={submit}
+        footer={
+          <>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" loading={form.formState.isSubmitting}>Enrol member</Button>
+          </>
+        }
+      >
+              <div className="space-y-4 py-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="cname">Full name</Label>
                   <Input id="cname" placeholder="Rakesh Patel" {...form.register("name")} aria-invalid={!!form.formState.errors.name} />
@@ -171,15 +181,8 @@ export default function CustomersPage() {
                   <Input id="cemail" type="email" placeholder="rakesh@example.com" {...form.register("email")} aria-invalid={!!form.formState.errors.email} />
                   {form.formState.errors.email && <p className="text-xs text-destructive">{form.formState.errors.email.message}</p>}
                 </div>
-                <DialogFooter>
-                  <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-                  <Button type="submit" loading={form.formState.isSubmitting}>Enrol member</Button>
-                </DialogFooter>
-              </form>
-            </DialogContent>
-          </Dialog>
-        }
-      />
+              </div>
+      </FormDialog>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="Total members" value={formatNumber(totals.total)} icon={Users} />
@@ -250,10 +253,12 @@ export default function CustomersPage() {
       <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
         <SheetContent side="bottom">
           <SheetHeader><SheetTitle>Filters</SheetTitle></SheetHeader>
-          <div className="px-5 pb-8">
+          <SheetBody>
             <div className="[&_button]:w-full [&>div]:flex-col">{filterControls}</div>
-            <Button className="mt-4 w-full" onClick={() => setFiltersOpen(false)}>Show {results.length} customers</Button>
-          </div>
+          </SheetBody>
+          <SheetFooter>
+            <Button className="w-full" onClick={() => setFiltersOpen(false)}>Show {results.length} customers</Button>
+          </SheetFooter>
         </SheetContent>
       </Sheet>
     </div>

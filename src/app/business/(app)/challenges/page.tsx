@@ -14,7 +14,7 @@ import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { StatCard } from "@/components/shared/stat-card";
@@ -135,13 +135,19 @@ export default function BusinessChallengesPage() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Create challenge</DialogTitle>
-            <DialogDescription>Members see active challenges on their dashboard.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
+      <FormDialog
+        open={open}
+        onOpenChange={setOpen}
+        title="Create challenge"
+        description="Members see active challenges on their dashboard."
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button onClick={create} loading={saving} disabled={form.name.trim().length < 3}>Publish challenge</Button>
+          </>
+        }
+      >
+        <div className="space-y-4 py-2">
             <div className="space-y-1.5">
               <Label htmlFor="chname">Challenge name</Label>
               <Input id="chname" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Wire up your home" />
@@ -172,12 +178,7 @@ export default function BusinessChallengesPage() {
               </div>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={create} loading={saving} disabled={form.name.trim().length < 3}>Publish challenge</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
     </div>
   );
 }

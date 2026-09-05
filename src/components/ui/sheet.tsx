@@ -25,17 +25,23 @@ const SheetOverlay = React.forwardRef<
 ));
 SheetOverlay.displayName = SheetPrimitive.Overlay.displayName;
 
+/**
+ * Sheet shell.
+ *
+ * Same contract as Dialog: the panel is a flex column that never scrolls itself.
+ * `SheetBody` is the single scroll owner; header and footer stay put.
+ */
 const sheetVariants = cva(
-  "fixed z-50 gap-4 bg-background shadow-xl transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-200 data-[state=open]:duration-300",
+  "fixed z-50 flex flex-col overflow-hidden bg-background shadow-xl transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-200 data-[state=open]:duration-300",
   {
     variants: {
       side: {
-        top: "inset-x-0 top-0 border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
+        top: "inset-x-0 top-0 max-h-[92dvh] border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
         bottom:
-          "inset-x-0 bottom-0 rounded-t-2xl border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom max-h-[92vh] overflow-y-auto",
-        left: "inset-y-0 left-0 h-full w-3/4 border-r data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left sm:max-w-sm",
+          "inset-x-0 bottom-0 max-h-[92dvh] rounded-t-2xl border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
+        left: "inset-y-0 left-0 h-[100dvh] w-3/4 border-r data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left sm:max-w-sm",
         right:
-          "inset-y-0 right-0 h-full w-full border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-md overflow-y-auto",
+          "inset-y-0 right-0 h-[100dvh] w-full border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-md",
       },
     },
     defaultVariants: { side: "right" },
@@ -44,21 +50,25 @@ const sheetVariants = cva(
 
 interface SheetContentProps
   extends React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content>,
-    VariantProps<typeof sheetVariants> {}
+    VariantProps<typeof sheetVariants> {
+  hideClose?: boolean;
+}
 
 const SheetContent = React.forwardRef<React.ElementRef<typeof SheetPrimitive.Content>, SheetContentProps>(
-  ({ side = "right", className, children, ...props }, ref) => (
+  ({ side = "right", className, children, hideClose, ...props }, ref) => (
     <SheetPortal>
       <SheetOverlay />
       <SheetPrimitive.Content ref={ref} className={cn(sheetVariants({ side }), className)} {...props}>
         {side === "bottom" && (
-          <div className="mx-auto mt-3 h-1.5 w-10 shrink-0 rounded-full bg-muted-foreground/25" />
+          <div className="mx-auto mt-3 h-1.5 w-10 shrink-0 rounded-full bg-muted-foreground/25" aria-hidden />
         )}
         {children}
-        <SheetPrimitive.Close className="absolute right-4 top-4 rounded-md p-1.5 text-muted-foreground opacity-80 transition hover:bg-muted hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <X className="size-4" />
-          <span className="sr-only">Close</span>
-        </SheetPrimitive.Close>
+        {!hideClose && (
+          <SheetPrimitive.Close className="absolute right-4 top-4 z-10 rounded-md bg-background/70 p-1.5 text-muted-foreground opacity-80 backdrop-blur transition hover:bg-muted hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <X className="size-4" />
+            <span className="sr-only">Close</span>
+          </SheetPrimitive.Close>
+        )}
       </SheetPrimitive.Content>
     </SheetPortal>
   )
@@ -66,11 +76,27 @@ const SheetContent = React.forwardRef<React.ElementRef<typeof SheetPrimitive.Con
 SheetContent.displayName = SheetPrimitive.Content.displayName;
 
 const SheetHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn("flex flex-col space-y-1 p-5 pr-12 text-left", className)} {...props} />
+  <div className={cn("shrink-0 space-y-1 p-5 pr-14 text-left", className)} {...props} />
 );
+
+/** The single scroll owner inside a sheet. */
+const SheetBody = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  ({ className, ...props }, ref) => (
+    <div ref={ref} className={cn("scroll-region min-h-0 flex-1 px-5 pb-5", className)} {...props} />
+  )
+);
+SheetBody.displayName = "SheetBody";
+
 const SheetFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn("flex flex-col-reverse gap-2 p-5 sm:flex-row sm:justify-end", className)} {...props} />
+  <div
+    className={cn(
+      "safe-bottom shrink-0 flex flex-col-reverse gap-2 border-t bg-background p-5 sm:flex-row sm:justify-end",
+      className
+    )}
+    {...props}
+  />
 );
+
 const SheetTitle = React.forwardRef<
   React.ElementRef<typeof SheetPrimitive.Title>,
   React.ComponentPropsWithoutRef<typeof SheetPrimitive.Title>
@@ -78,6 +104,7 @@ const SheetTitle = React.forwardRef<
   <SheetPrimitive.Title ref={ref} className={cn("text-lg font-semibold tracking-tight", className)} {...props} />
 ));
 SheetTitle.displayName = SheetPrimitive.Title.displayName;
+
 const SheetDescription = React.forwardRef<
   React.ElementRef<typeof SheetPrimitive.Description>,
   React.ComponentPropsWithoutRef<typeof SheetPrimitive.Description>
@@ -86,4 +113,7 @@ const SheetDescription = React.forwardRef<
 ));
 SheetDescription.displayName = SheetPrimitive.Description.displayName;
 
-export { Sheet, SheetPortal, SheetOverlay, SheetTrigger, SheetClose, SheetContent, SheetHeader, SheetFooter, SheetTitle, SheetDescription };
+export {
+  Sheet, SheetPortal, SheetOverlay, SheetTrigger, SheetClose, SheetContent,
+  SheetHeader, SheetBody, SheetFooter, SheetTitle, SheetDescription,
+};

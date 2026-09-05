@@ -28,6 +28,13 @@
     --input: 214 24% 89%;
     --ring: 218 92% 55%;
     --radius: 0.75rem;
+
+    /* Scrollbar system — quiet neutral, brand-consistent */
+    --scrollbar-size: 11px;
+    --scrollbar-track: 214 32% 96%;
+    --scrollbar-thumb: 216 16% 78%;
+    --scrollbar-thumb-hover: 216 16% 64%;
+    --scrollbar-thumb-active: 218 40% 48%;
   }
 
   .dark {
@@ -54,6 +61,11 @@
     --border: 220 20% 20%;
     --input: 220 20% 22%;
     --ring: 214 100% 66%;
+
+    --scrollbar-track: 222 30% 12%;
+    --scrollbar-thumb: 220 16% 30%;
+    --scrollbar-thumb-hover: 220 16% 42%;
+    --scrollbar-thumb-active: 214 60% 56%;
   }
 }
 
@@ -73,6 +85,53 @@
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Premium scrollbar system
+   Applied only on precise-pointer devices; touch devices keep native,
+   momentum-friendly overlay scrollbars.
+   --------------------------------------------------------------------------- */
+@media (pointer: fine) {
+  @supports (scrollbar-width: thin) {
+    html {
+      scrollbar-width: thin;
+      scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track) / 0.55);
+    }
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
+    }
+  }
+
+  ::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--scrollbar-thumb));
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+    transition: background-color 0.15s ease;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--scrollbar-thumb-hover));
+  }
+  ::-webkit-scrollbar-thumb:active {
+    background-color: hsl(var(--scrollbar-thumb-active));
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* Root document keeps a faint track so the page scroll position stays legible */
+  html::-webkit-scrollbar-track {
+    background: hsl(var(--scrollbar-track) / 0.55);
+  }
+}
+
 @layer utilities {
   .safe-bottom {
     padding-bottom: max(env(safe-area-inset-bottom), 0.5rem);
@@ -86,6 +145,26 @@
   .no-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;
+  }
+  /* A deliberate scroll owner: contained overscroll + smooth touch scrolling */
+  .scroll-region {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .scroll-region-x {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  /*
+   * When validation moves focus to a field inside a scroll region, the browser
+   * scrolls it to the nearest edge — which can leave it tucked under a sticky
+   * dialog header or footer. A scroll margin gives every focusable field a
+   * comfortable landing area instead.
+   */
+  .scroll-region :is(input, textarea, select, button, [tabindex]) {
+    scroll-margin-block: 2rem;
   }
   .tabular {
     font-variant-numeric: tabular-nums;

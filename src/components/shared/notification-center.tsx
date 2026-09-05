@@ -113,7 +113,7 @@ export function NotificationCenter({ scope = "customer" }: { scope?: "customer" 
         <Separator />
 
         {/* List */}
-        <div className="max-h-[380px] overflow-y-auto p-1.5 space-y-1">
+        <div className="scroll-region max-h-[min(380px,60dvh)] space-y-1 p-1.5">
           {items.length === 0 ? (
             <div className="py-10 text-center">
               <div className="mx-auto flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">

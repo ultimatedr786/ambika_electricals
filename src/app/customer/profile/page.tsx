@@ -17,9 +17,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-} from "@/components/ui/dialog";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/shared/page-header";
 import { TierBadge } from "@/components/shared/tier-badge";
@@ -126,13 +124,20 @@ export default function ProfilePage() {
         <LinkRow icon={LogOut} label="Sign out" onClick={() => setSignOutOpen(true)} destructive />
       </Card>
 
-      <Dialog open={editing} onOpenChange={setEditing}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit profile</DialogTitle>
-            <DialogDescription>Update your contact details and birthday.</DialogDescription>
-          </DialogHeader>
-          <form onSubmit={save} className="space-y-4" noValidate>
+      <FormDialog
+        open={editing}
+        onOpenChange={setEditing}
+        title="Edit profile"
+        description="Update your contact details and birthday."
+        onSubmit={save}
+        footer={
+          <>
+            <Button type="button" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
+            <Button type="submit" loading={form.formState.isSubmitting}>Save changes</Button>
+          </>
+        }
+      >
+          <div className="space-y-4 py-2">
             <div className="space-y-1.5">
               <Label htmlFor="p-name">Full name</Label>
               <Input id="p-name" {...form.register("name")} />
@@ -152,13 +157,8 @@ export default function ProfilePage() {
               <Label htmlFor="p-bday">Birthday</Label>
               <Input id="p-bday" type="date" {...form.register("birthday")} />
             </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
-              <Button type="submit" loading={form.formState.isSubmitting}>Save changes</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+          </div>
+      </FormDialog>
 
       <ConfirmDialog
         open={signOutOpen}

@@ -89,14 +89,54 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setHydrated(true);
   }, []);
 
+  /**
+   * Persistence is deliberately off the interaction path.
+   *
+   * Previously every state mutation serialised the whole AppState synchronously,
+   * so a single cart tap blocked the main thread with a JSON.stringify of ~2,000
+   * mock records. We now keep a ref of the latest state and flush it once the
+   * browser is idle (or on the next frame as a fallback), plus a guaranteed
+   * flush when the tab is hidden or unloaded so nothing is lost.
+   */
+  const stateRef = React.useRef(state);
+  stateRef.current = state;
+
+  const flush = React.useCallback(() => {
+    try {
+      window.sessionStorage.setItem(KEY, JSON.stringify(stateRef.current));
+    } catch {
+      /* quota or private mode - persistence is best effort */
+    }
+  }, []);
+
   React.useEffect(() => {
     if (!hydrated) return;
-    try {
-      window.sessionStorage.setItem(KEY, JSON.stringify(state));
-    } catch {
-      /* ignore */
-    }
-  }, [state, hydrated]);
+    const w = window as Window & {
+      requestIdleCallback?: (cb: IdleRequestCallback, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    let idle: number | undefined;
+    let timer: number | undefined;
+    if (w.requestIdleCallback) idle = w.requestIdleCallback(() => flush(), { timeout: 1000 });
+    else timer = window.setTimeout(flush, 250);
+    return () => {
+      if (idle !== undefined && w.cancelIdleCallback) w.cancelIdleCallback(idle);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [state, hydrated, flush]);
+
+  React.useEffect(() => {
+    if (!hydrated) return;
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, [hydrated, flush]);
 
   const reset = React.useCallback(() => {
     window.sessionStorage.removeItem(KEY);

@@ -4,10 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart,
-  ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis,
-} from "recharts";
-import {
   ArrowRight, BadgePercent, Gift, Package, Plus, QrCode, ShoppingCart, TrendingUp, Users, Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { StatCard } from "@/components/shared/stat-card";
 import { StatsSkeleton } from "@/components/shared/loading-skeleton";
+import { PointsBarChart, RevenueAreaChart, TierPieChart } from "@/components/charts";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { categoryMix, tierDistribution, topProducts, topRewards } from "@/lib/mock-data/analytics";
@@ -81,24 +78,7 @@ export default function BusinessDashboard() {
           </CardHeader>
           <CardContent>
             <div className="h-[260px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={series} margin={{ top: 6, right: 6, left: -18, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="rev" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
-                      <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" interval={4} />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" tickFormatter={(v) => `₹${Math.round(Number(v) / 1000)}k`} />
-                  <RTooltip
-                    contentStyle={{ borderRadius: 12, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }}
-                    formatter={(v) => [formatINR(Number(v)), "Revenue"]}
-                  />
-                  <Area type="monotone" dataKey="revenue" stroke="hsl(var(--primary))" strokeWidth={2} fill="url(#rev)" />
-                </AreaChart>
-              </ResponsiveContainer>
+              <RevenueAreaChart data={series} />
             </div>
           </CardContent>
         </Card>
@@ -108,20 +88,7 @@ export default function BusinessDashboard() {
           <CardHeader><CardTitle className="text-base">Points issued vs redeemed</CardTitle></CardHeader>
           <CardContent>
             <div className="h-[260px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={pointsSeries} margin={{ top: 6, right: 6, left: -18, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" />
-                  <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" />
-                  <RTooltip
-                    cursor={{ fill: "hsl(var(--muted))" }}
-                    contentStyle={{ borderRadius: 12, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }}
-                  />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Bar dataKey="issued" name="Issued" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="redeemed" name="Redeemed" fill="#f5b409" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              <PointsBarChart data={pointsSeries} compact />
             </div>
           </CardContent>
         </Card>
@@ -162,14 +129,7 @@ export default function BusinessDashboard() {
           <CardHeader><CardTitle className="text-base">Customer tiers</CardTitle></CardHeader>
           <CardContent>
             <div className="h-[190px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={tierDistribution} dataKey="customers" nameKey="tier" innerRadius={48} outerRadius={72} paddingAngle={2} strokeWidth={0}>
-                    {tierDistribution.map((_, i) => <Cell key={i} fill={PIE[i]} />)}
-                  </Pie>
-                  <RTooltip contentStyle={{ borderRadius: 12, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }} />
-                </PieChart>
-              </ResponsiveContainer>
+              <TierPieChart data={tierDistribution} palette={PIE} />
             </div>
             <div className="mt-2 space-y-1.5">
               {tierDistribution.map((t, i) => (

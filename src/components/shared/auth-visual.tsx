@@ -5,647 +5,503 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 
 /**
- * Premium Three.js "Electrical Rewards Network" visual for Login & Signup.
- * Concept: Ambika Electricals → Electrical Purchase (LED bulb, modular switch, MCB, cable spool)
- *          → Membership Card → Reward Point Tokens.
+ * "Quiet Power" — the Ambika Electricals Rewards Network auth visual.
  *
- * Fully responsive, lazy-loadable, respects prefers-reduced-motion, and
- * disposes all GPU resources properly on unmount.
+ * One editorial composition, not a collection of floating objects:
+ *
+ *   circuit line  →  current pulse  →  brushed-metal membership card
+ *                                        →  emits one reward token
+ *
+ * Supporting cues are limited to three: an LED glow, a modular-switch
+ * geometry, and the circuit line itself. Deep navy field, one electric-blue
+ * accent, one warm reward accent, restrained glow, fixed clean camera.
+ *
+ * Motion is a single slow ~7s cycle. It pauses when the tab is hidden and
+ * renders a single static frame under prefers-reduced-motion.
+ *
+ * This module is only ever reached through a dynamic import — three.js and
+ * @react-three/fiber must stay out of the auth form's critical bundle.
  */
 
-function useReducedMotion(): boolean {
-  const [reduced, setReduced] = React.useState(false);
+const BLUE = "#38bdf8";
+const BLUE_DEEP = "#1d4ed8";
+const AMBER = "#f5b409";
+
+const CYCLE = 7.2; // seconds — one purchase→points story
+const TRAVEL_START = 0.6;
+const TRAVEL_END = 3.4;
+const TOKEN_START = 3.4;
+const TOKEN_END = 6.2;
+
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const smooth = (t: number) => t * t * (3 - 2 * t);
+
+/* ------------------------------------------------------------------ helpers */
+
+/** Soft radial sprite texture used for glows and the contact shadow. */
+function makeRadialTexture(stops: [number, string][], size = 128) {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  for (const [offset, color] of stops) g.addColorStop(offset, color);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Rounded-rectangle plate with a small bevel — reads as a real manufactured part. */
+function makePlateGeometry(width: number, height: number, radius: number, depth: number, bevel: number) {
+  const shape = new THREE.Shape();
+  const w = width / 2;
+  const h = height / 2;
+  shape.moveTo(-w + radius, -h);
+  shape.lineTo(w - radius, -h);
+  shape.quadraticCurveTo(w, -h, w, -h + radius);
+  shape.lineTo(w, h - radius);
+  shape.quadraticCurveTo(w, h, w - radius, h);
+  shape.lineTo(-w + radius, h);
+  shape.quadraticCurveTo(-w, h, -w, h - radius);
+  shape.lineTo(-w, -h + radius);
+  shape.quadraticCurveTo(-w, -h, -w + radius, -h);
+
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth,
+    bevelEnabled: true,
+    bevelThickness: bevel,
+    bevelSize: bevel,
+    bevelSegments: 3,
+    curveSegments: 12,
+  });
+  geo.center();
+  return geo;
+}
+
+function useDisposable<T extends { dispose: () => void }>(factory: () => T, deps: React.DependencyList = []) {
+  const value = React.useMemo(factory, deps); // eslint-disable-line react-hooks/exhaustive-deps
+  React.useEffect(() => () => value.dispose(), [value]);
+  return value;
+}
+
+/* -------------------------------------------------------------- scene parts */
+
+/** The single circuit path: enters from the left, turns once, reaches the card. */
+function useCircuitCurve() {
+  return React.useMemo(
+    () =>
+      new THREE.CatmullRomCurve3(
+        [
+          new THREE.Vector3(-4.6, -1.02, 1.55),
+          new THREE.Vector3(-2.55, -1.02, 1.55),
+          new THREE.Vector3(-2.15, -1.02, 1.3),
+          new THREE.Vector3(-2.05, -1.02, 0.55),
+          new THREE.Vector3(-1.7, -1.02, 0.16),
+          new THREE.Vector3(-0.72, -1.02, 0.08),
+        ],
+        false,
+        "catmullrom",
+        0.02
+      ),
+    []
+  );
+}
+
+function CircuitLine({ curve }: { curve: THREE.CatmullRomCurve3 }) {
+  const geo = useDisposable(() => new THREE.TubeGeometry(curve, 90, 0.018, 8, false), [curve]);
+  const nodeGeo = useDisposable(() => new THREE.SphereGeometry(0.045, 12, 12), []);
+
+  return (
+    <group>
+      <mesh geometry={geo}>
+        <meshStandardMaterial
+          color={BLUE_DEEP}
+          emissive={BLUE}
+          emissiveIntensity={0.35}
+          roughness={0.4}
+          metalness={0.2}
+        />
+      </mesh>
+      <mesh geometry={nodeGeo} position={[-2.1, -1.02, 0.92]}>
+        <meshStandardMaterial color={BLUE} emissive={BLUE} emissiveIntensity={0.8} roughness={0.3} />
+      </mesh>
+      <mesh geometry={nodeGeo} position={[-3.55, -1.02, 1.55]} scale={0.7}>
+        <meshStandardMaterial color={BLUE} emissive={BLUE} emissiveIntensity={0.4} roughness={0.3} />
+      </mesh>
+    </group>
+  );
+}
+
+/** The current pulse that travels the circuit into the card. */
+function CurrentPulse({
+  curve,
+  glowTexture,
+  reduced,
+}: {
+  curve: THREE.CatmullRomCurve3;
+  glowTexture: THREE.Texture;
+  reduced: boolean;
+}) {
+  const core = React.useRef<THREE.Mesh>(null);
+  const halo = React.useRef<THREE.Sprite>(null);
+  const point = React.useRef<THREE.PointLight>(null);
+  const position = React.useRef(new THREE.Vector3());
+
+  const apply = React.useCallback(
+    (progress: number, intensity: number) => {
+      curve.getPointAt(clamp01(progress), position.current);
+      if (core.current) {
+        core.current.position.copy(position.current);
+        core.current.scale.setScalar(0.6 + intensity * 0.5);
+        (core.current.material as THREE.MeshBasicMaterial).opacity = intensity;
+      }
+      if (halo.current) {
+        halo.current.position.copy(position.current);
+        halo.current.scale.setScalar(0.34 + intensity * 0.24);
+        halo.current.material.opacity = intensity * 0.75;
+      }
+      if (point.current) {
+        point.current.position.copy(position.current);
+        point.current.intensity = intensity * 3.2;
+      }
+    },
+    [curve]
+  );
+
   React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReduced(mq.matches);
-    const handler = (e: MediaQueryListEvent) => setReduced(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
-  return reduced;
-}
+    if (reduced) apply(0.72, 0.85);
+  }, [reduced, apply]);
 
-// Brand color palette
-const COLOR_BLUE_GLOW = new THREE.Color("#38bdf8");
-const COLOR_GOLD_TOKEN = new THREE.Color("#f59e0b");
-const COLOR_COPPER = new THREE.Color("#f97316");
-
-// Spline curve for current / point travel
-const createCircuitCurve = () => {
-  return new THREE.CatmullRomCurve3([
-    new THREE.Vector3(-2.8, 1.2, 0),
-    new THREE.Vector3(-1.8, 1.0, 0.2),
-    new THREE.Vector3(-1.2, 0.2, 0.3),
-    new THREE.Vector3(-0.4, -0.2, 0.4),
-    new THREE.Vector3(0.5, 0.1, 0.3),
-    new THREE.Vector3(1.4, -0.4, 0.2),
-    new THREE.Vector3(2.4, 0.2, 0),
-  ]);
-};
-
-/**
- * Procedural Abstract LED Bulb
- */
-function LedBulb({ position, scale = 1, reduced }: { position: [number, number, number]; scale?: number; reduced: boolean }) {
-  const bulbRef = React.useRef<THREE.Group>(null);
-
-  useFrame((state) => {
-    if (!bulbRef.current || reduced) return;
-    const t = state.clock.elapsedTime;
-    bulbRef.current.position.y = position[1] + Math.sin(t * 0.9) * 0.04;
-    bulbRef.current.rotation.y = t * 0.15;
+  useFrame(({ clock }) => {
+    if (reduced) return;
+    const t = clock.elapsedTime % CYCLE;
+    if (t < TRAVEL_START || t > TRAVEL_END) {
+      apply(0, 0);
+      return;
+    }
+    const p = (t - TRAVEL_START) / (TRAVEL_END - TRAVEL_START);
+    // ease-in-out travel, fading in at the start and absorbed by the card
+    const intensity = Math.sin(Math.PI * clamp01(p)) ** 0.6;
+    apply(smooth(p), intensity);
   });
 
   return (
-    <group ref={bulbRef} position={position} scale={scale}>
-      {/* Frosted Glass Dome */}
-      <mesh position={[0, 0.32, 0]}>
-        <sphereGeometry args={[0.3, 24, 24]} />
-        <meshStandardMaterial
-          color="#e0f2fe"
-          emissive="#38bdf8"
-          emissiveIntensity={0.5}
-          roughness={0.2}
-          metalness={0.1}
+    <group>
+      <mesh ref={core}>
+        <sphereGeometry args={[0.062, 14, 14]} />
+        <meshBasicMaterial color="#e0f4ff" transparent opacity={0} />
+      </mesh>
+      <sprite ref={halo}>
+        <spriteMaterial
+          map={glowTexture}
+          color={BLUE}
           transparent
-          opacity={0.85}
+          opacity={0}
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
         />
-      </mesh>
-      {/* Inner Glowing Filament */}
-      <mesh position={[0, 0.32, 0]}>
-        <torusGeometry args={[0.1, 0.02, 12, 24]} />
-        <meshBasicMaterial color="#7dd3fc" />
-      </mesh>
-      {/* Neck / Lower Dome */}
-      <mesh position={[0, 0.12, 0]}>
-        <cylinderGeometry args={[0.2, 0.14, 0.18, 20]} />
-        <meshStandardMaterial color="#cbd5e1" roughness={0.3} metalness={0.6} />
-      </mesh>
-      {/* Metallic Base Thread */}
-      <mesh position={[0, -0.04, 0]}>
-        <cylinderGeometry args={[0.14, 0.14, 0.16, 20]} />
-        <meshStandardMaterial color="#94a3b8" roughness={0.25} metalness={0.85} />
-      </mesh>
-      {/* Base Contact Point */}
-      <mesh position={[0, -0.14, 0]}>
-        <cylinderGeometry args={[0.08, 0.04, 0.06, 16]} />
-        <meshStandardMaterial color="#475569" roughness={0.5} metalness={0.9} />
-      </mesh>
+      </sprite>
+      <pointLight ref={point} color={BLUE} intensity={0} distance={2.6} />
     </group>
   );
 }
 
-/**
- * Procedural Abstract Modular Switch Plate
- */
-function ModularSwitch({ position, scale = 1, reduced }: { position: [number, number, number]; scale?: number; reduced: boolean }) {
-  const groupRef = React.useRef<THREE.Group>(null);
+/** Hero object: a minimal brushed-metal / electric-blue membership card. */
+function MembershipCard({ reduced }: { reduced: boolean }) {
+  const group = React.useRef<THREE.Group>(null);
+  const rim = React.useRef<THREE.Mesh>(null);
 
-  useFrame((state) => {
-    if (!groupRef.current || reduced) return;
-    const t = state.clock.elapsedTime;
-    groupRef.current.position.y = position[1] + Math.sin(t * 0.8 + 1.2) * 0.04;
-    groupRef.current.rotation.y = -0.1 + Math.sin(t * 0.2) * 0.05;
-  });
+  const body = useDisposable(() => makePlateGeometry(2.42, 1.53, 0.16, 0.055, 0.018), []);
+  const chip = useDisposable(() => makePlateGeometry(0.34, 0.26, 0.05, 0.012, 0.006), []);
+  const stripe = useDisposable(() => makePlateGeometry(0.92, 0.055, 0.027, 0.006, 0.003), []);
+  const stripeShort = useDisposable(() => makePlateGeometry(0.56, 0.055, 0.027, 0.006, 0.003), []);
+  const sparkGeo = useDisposable(() => {
+    const s = new THREE.Shape();
+    s.moveTo(0.09, 0.24);
+    s.lineTo(-0.09, 0.02);
+    s.lineTo(0.015, 0.02);
+    s.lineTo(-0.06, -0.24);
+    s.lineTo(0.11, -0.02);
+    s.lineTo(-0.005, -0.02);
+    s.closePath();
+    return new THREE.ExtrudeGeometry(s, { depth: 0.012, bevelEnabled: false });
+  }, []);
 
-  return (
-    <group ref={groupRef} position={position} scale={scale} rotation={[0.15, -0.25, 0]}>
-      {/* Switch Plate Face */}
-      <mesh position={[0, 0, 0]}>
-        <boxGeometry args={[0.65, 0.75, 0.06]} />
-        <meshStandardMaterial color="#1e293b" roughness={0.3} metalness={0.4} />
-      </mesh>
-      {/* Inner Switch Bezel */}
-      <mesh position={[0, 0, 0.04]}>
-        <boxGeometry args={[0.48, 0.58, 0.04]} />
-        <meshStandardMaterial color="#0f172a" roughness={0.4} metalness={0.6} />
-      </mesh>
-      {/* Rocker Button 1 */}
-      <mesh position={[-0.11, 0, 0.07]} rotation={[0.1, 0, 0]}>
-        <boxGeometry args={[0.18, 0.38, 0.04]} />
-        <meshStandardMaterial color="#334155" roughness={0.2} metalness={0.5} />
-      </mesh>
-      {/* Rocker Button 2 */}
-      <mesh position={[0.11, 0, 0.07]} rotation={[-0.08, 0, 0]}>
-        <boxGeometry args={[0.18, 0.38, 0.04]} />
-        <meshStandardMaterial color="#334155" roughness={0.2} metalness={0.5} />
-      </mesh>
-      {/* Subtle LED Status Indicator */}
-      <mesh position={[0.11, 0.12, 0.095]}>
-        <circleGeometry args={[0.02, 16]} />
-        <meshBasicMaterial color="#38bdf8" />
-      </mesh>
-    </group>
-  );
-}
+  useFrame(({ clock }) => {
+    if (reduced || !group.current) return;
+    const t = clock.elapsedTime;
+    group.current.position.y = 0.02 + Math.sin(t * 0.45) * 0.022;
+    group.current.rotation.z = -0.055 + Math.sin(t * 0.32) * 0.012;
 
-/**
- * Procedural Abstract MCB (Miniature Circuit Breaker)
- */
-function McbBreaker({ position, scale = 1, reduced }: { position: [number, number, number]; scale?: number; reduced: boolean }) {
-  const groupRef = React.useRef<THREE.Group>(null);
-
-  useFrame((state) => {
-    if (!groupRef.current || reduced) return;
-    const t = state.clock.elapsedTime;
-    groupRef.current.position.y = position[1] + Math.sin(t * 0.85 + 2.4) * 0.035;
-    groupRef.current.rotation.y = 0.2 + Math.cos(t * 0.18) * 0.06;
-  });
-
-  return (
-    <group ref={groupRef} position={position} scale={scale} rotation={[0.1, 0.3, 0]}>
-      {/* Main MCB Body */}
-      <mesh position={[0, 0, 0]}>
-        <boxGeometry args={[0.36, 0.72, 0.5]} />
-        <meshStandardMaterial color="#334155" roughness={0.35} metalness={0.3} />
-      </mesh>
-      {/* Front Face / Label Plate */}
-      <mesh position={[0, 0, 0.26]}>
-        <boxGeometry args={[0.32, 0.58, 0.04]} />
-        <meshStandardMaterial color="#f8fafc" roughness={0.4} metalness={0.1} />
-      </mesh>
-      {/* Status Window */}
-      <mesh position={[0, 0.16, 0.285]}>
-        <planeGeometry args={[0.18, 0.07]} />
-        <meshBasicMaterial color="#22c55e" />
-      </mesh>
-      {/* Switch Toggle Handle */}
-      <mesh position={[0, -0.06, 0.32]} rotation={[-0.25, 0, 0]}>
-        <boxGeometry args={[0.16, 0.14, 0.18]} />
-        <meshStandardMaterial color="#0284c7" roughness={0.3} metalness={0.5} />
-      </mesh>
-    </group>
-  );
-}
-
-/**
- * Procedural Abstract Cable Spool / Coil
- */
-function CableSpool({ position, scale = 1, reduced }: { position: [number, number, number]; scale?: number; reduced: boolean }) {
-  const groupRef = React.useRef<THREE.Group>(null);
-
-  useFrame((state) => {
-    if (!groupRef.current || reduced) return;
-    const t = state.clock.elapsedTime;
-    groupRef.current.position.y = position[1] + Math.sin(t * 0.75 + 3.6) * 0.04;
-    groupRef.current.rotation.z = t * 0.12;
-  });
-
-  return (
-    <group ref={groupRef} position={position} scale={scale} rotation={[0.3, -0.2, 0]}>
-      {/* Top Flange */}
-      <mesh position={[0, 0, 0.15]}>
-        <cylinderGeometry args={[0.34, 0.34, 0.04, 24]} />
-        <meshStandardMaterial color="#1e293b" roughness={0.4} metalness={0.3} />
-      </mesh>
-      {/* Bottom Flange */}
-      <mesh position={[0, 0, -0.15]}>
-        <cylinderGeometry args={[0.34, 0.34, 0.04, 24]} />
-        <meshStandardMaterial color="#1e293b" roughness={0.4} metalness={0.3} />
-      </mesh>
-      {/* Copper Wire Coils Wrapped around center */}
-      <mesh position={[0, 0, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[0.22, 0.07, 16, 32]} />
-        <meshStandardMaterial
-          color={COLOR_COPPER}
-          emissive="#c2410c"
-          emissiveIntensity={0.25}
-          roughness={0.25}
-          metalness={0.8}
-        />
-      </mesh>
-      {/* Center Core */}
-      <mesh position={[0, 0, 0]}>
-        <cylinderGeometry args={[0.12, 0.12, 0.32, 20]} />
-        <meshStandardMaterial color="#0f172a" roughness={0.6} metalness={0.4} />
-      </mesh>
-    </group>
-  );
-}
-
-/**
- * Membership Card in 3D (The connector between purchase & rewards)
- */
-function MembershipCard3D({ position, scale = 1, reduced }: { position: [number, number, number]; scale?: number; reduced: boolean }) {
-  const cardRef = React.useRef<THREE.Group>(null);
-
-  useFrame((state) => {
-    if (!cardRef.current || reduced) return;
-    const t = state.clock.elapsedTime;
-    cardRef.current.position.y = position[1] + Math.sin(t * 0.7 + 0.8) * 0.05;
-    cardRef.current.rotation.y = -0.25 + Math.sin(t * 0.3) * 0.12;
-    cardRef.current.rotation.x = 0.15 + Math.cos(t * 0.25) * 0.06;
-  });
-
-  return (
-    <group ref={cardRef} position={position} scale={scale} rotation={[0.15, -0.2, 0.08]}>
-      {/* Card Base Slab */}
-      <mesh position={[0, 0, 0]}>
-        <boxGeometry args={[1.3, 0.82, 0.03]} />
-        <meshStandardMaterial
-          color="#0f172a"
-          roughness={0.2}
-          metalness={0.7}
-          emissive="#1e3a8a"
-          emissiveIntensity={0.3}
-        />
-      </mesh>
-      {/* Card Border Accent */}
-      <mesh position={[0, 0, 0.018]}>
-        <planeGeometry args={[1.24, 0.76]} />
-        <meshBasicMaterial color="#0284c7" transparent opacity={0.35} />
-      </mesh>
-      {/* Gold Smart Chip */}
-      <mesh position={[-0.34, 0.12, 0.02]}>
-        <boxGeometry args={[0.22, 0.18, 0.01]} />
-        <meshStandardMaterial
-          color="#fbbf24"
-          emissive="#d97706"
-          emissiveIntensity={0.4}
-          roughness={0.3}
-          metalness={0.9}
-        />
-      </mesh>
-      {/* Stylized AE Spark Logo Mark */}
-      <mesh position={[0.34, 0.14, 0.02]}>
-        <circleGeometry args={[0.12, 20]} />
-        <meshBasicMaterial color="#38bdf8" />
-      </mesh>
-      {/* Magnetic / Loyalty Stripe */}
-      <mesh position={[0, -0.18, 0.02]}>
-        <planeGeometry args={[0.9, 0.06]} />
-        <meshBasicMaterial color="#38bdf8" transparent opacity={0.6} />
-      </mesh>
-    </group>
-  );
-}
-
-/**
- * Reward Point Token (Golden coin with gentle pulse)
- */
-function RewardToken3D({ position, scale = 1, reduced }: { position: [number, number, number]; scale?: number; reduced: boolean }) {
-  const tokenRef = React.useRef<THREE.Group>(null);
-  const ringRef = React.useRef<THREE.Mesh>(null);
-
-  useFrame((state) => {
-    if (!tokenRef.current || reduced) return;
-    const t = state.clock.elapsedTime;
-    tokenRef.current.position.y = position[1] + Math.sin(t * 0.9 + 1.8) * 0.05;
-    tokenRef.current.rotation.y = t * 0.4;
-
-    if (ringRef.current) {
-      const pulse = 1 + Math.sin(t * 1.8) * 0.12;
-      ringRef.current.scale.set(pulse, pulse, pulse);
+    if (rim.current) {
+      const cycle = t % CYCLE;
+      // the card briefly acknowledges the arriving current
+      const hit = cycle > TRAVEL_END - 0.5 && cycle < TRAVEL_END + 0.9
+        ? 1 - Math.abs(cycle - TRAVEL_END) / 0.9
+        : 0;
+      const mat = rim.current.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.16 + clamp01(hit) * 0.4;
     }
   });
 
   return (
-    <group ref={tokenRef} position={position} scale={scale} rotation={[0.1, 0, 0]}>
-      {/* Golden Coin Base */}
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.5, 0.5, 0.08, 32]} />
-        <meshStandardMaterial
-          color="#f59e0b"
-          emissive="#d97706"
-          emissiveIntensity={0.45}
-          roughness={0.25}
-          metalness={0.85}
-        />
+    <group ref={group} position={[0.06, 0.02, 0]} rotation={[0.16, -0.34, -0.055]}>
+      {/* brushed metal body */}
+      <mesh geometry={body} castShadow={false}>
+        <meshStandardMaterial color="#59708f" metalness={0.98} roughness={0.31} envMapIntensity={1} />
       </mesh>
-      {/* Embossed Inner Star Ring */}
-      <mesh position={[0, 0, 0.045]}>
-        <torusGeometry args={[0.34, 0.03, 12, 32]} />
-        <meshStandardMaterial color="#fef08a" emissive="#fbbf24" emissiveIntensity={0.6} metalness={0.9} />
+
+      {/* electric-blue rim, pulses when the current lands */}
+      <mesh ref={rim} geometry={body} scale={[1.012, 1.02, 0.9]} position={[0, 0, -0.004]}>
+        <meshBasicMaterial color={BLUE} transparent opacity={0.16} />
       </mesh>
-      {/* Center Star / Point Hub */}
-      <mesh position={[0, 0, 0.048]}>
-        <octahedronGeometry args={[0.15, 0]} />
-        <meshStandardMaterial color="#ffffff" emissive="#fef08a" emissiveIntensity={0.8} />
+
+      {/* darker inner face keeps the metal from reading as a flat slab */}
+      <mesh position={[0, 0, 0.037]}>
+        <planeGeometry args={[2.24, 1.35]} />
+        <meshStandardMaterial color="#1b2740" metalness={0.6} roughness={0.42} transparent opacity={0.72} />
       </mesh>
-      {/* Halo Pulse Ring */}
-      <mesh ref={ringRef} position={[0, 0, 0]}>
-        <torusGeometry args={[0.62, 0.015, 8, 36]} />
-        <meshBasicMaterial color="#fbbf24" transparent opacity={0.45} />
+
+      <mesh geometry={chip} position={[-0.72, 0.35, 0.05]}>
+        <meshStandardMaterial color="#e8b53c" metalness={0.95} roughness={0.28} emissive={AMBER} emissiveIntensity={0.12} />
+      </mesh>
+
+      <mesh geometry={sparkGeo} position={[0.86, 0.36, 0.05]} scale={1.25}>
+        <meshStandardMaterial color="#bfe9ff" emissive={BLUE} emissiveIntensity={0.9} roughness={0.25} metalness={0.4} />
+      </mesh>
+
+      <mesh geometry={stripe} position={[-0.55, -0.3, 0.05]}>
+        <meshStandardMaterial color="#93aecd" metalness={0.7} roughness={0.5} transparent opacity={0.5} />
+      </mesh>
+      <mesh geometry={stripeShort} position={[-0.73, -0.47, 0.05]}>
+        <meshStandardMaterial color="#93aecd" metalness={0.7} roughness={0.55} transparent opacity={0.3} />
       </mesh>
     </group>
   );
 }
 
-/**
- * Circuit Trace Paths & Flowing Point Energy Pulses
- */
-function CircuitNetwork({ reduced }: { reduced: boolean }) {
-  const curve = React.useMemo(() => createCircuitCurve(), []);
-  const pulseGroupRef = React.useRef<THREE.Group>(null);
+/** The reward token the card emits once the current has landed. */
+function RewardToken({ glowTexture, reduced }: { glowTexture: THREE.Texture; reduced: boolean }) {
+  const group = React.useRef<THREE.Group>(null);
+  const disc = React.useRef<THREE.Mesh>(null);
+  const halo = React.useRef<THREE.Sprite>(null);
 
-  // Line geometry for circuit spline
-  const lineGeo = React.useMemo(() => {
-    const points = curve.getPoints(64);
-    return new THREE.BufferGeometry().setFromPoints(points);
-  }, [curve]);
+  const apply = React.useCallback((progress: number) => {
+    if (!group.current) return;
+    const p = clamp01(progress);
+    const eased = smooth(p);
+    group.current.position.set(1.12 + eased * 0.5, -0.12 + eased * 1.02, 0.28 + eased * 0.2);
+    group.current.rotation.y = eased * 1.9;
+    const opacity = p < 0.18 ? p / 0.18 : p > 0.7 ? Math.max(0, 1 - (p - 0.7) / 0.3) : 1;
+    group.current.scale.setScalar(0.72 + eased * 0.3);
+    if (disc.current) {
+      const mat = disc.current.material as THREE.MeshStandardMaterial;
+      mat.opacity = opacity;
+      mat.emissiveIntensity = 0.25 + opacity * 0.5;
+    }
+    if (halo.current) halo.current.material.opacity = opacity * 0.55;
+  }, []);
 
-  const lineMat = React.useMemo(
-    () => new THREE.LineBasicMaterial({ color: COLOR_BLUE_GLOW, transparent: true, opacity: 0.45, linewidth: 2 }),
+  React.useEffect(() => {
+    if (reduced) apply(0.45);
+  }, [reduced, apply]);
+
+  useFrame(({ clock }) => {
+    if (reduced) return;
+    const t = clock.elapsedTime % CYCLE;
+    if (t < TOKEN_START || t > TOKEN_END) {
+      apply(0);
+      if (group.current) group.current.scale.setScalar(0.001);
+      return;
+    }
+    apply((t - TOKEN_START) / (TOKEN_END - TOKEN_START));
+  });
+
+  return (
+    <group ref={group} scale={0.001}>
+      <mesh ref={disc} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.19, 0.19, 0.045, 30]} />
+        <meshStandardMaterial
+          color="#f8c53a"
+          emissive={AMBER}
+          emissiveIntensity={0.4}
+          metalness={0.85}
+          roughness={0.3}
+          transparent
+          opacity={0}
+        />
+      </mesh>
+      <sprite ref={halo} scale={1.05}>
+        <spriteMaterial
+          map={glowTexture}
+          color={AMBER}
+          transparent
+          opacity={0}
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+        />
+      </sprite>
+    </group>
+  );
+}
+
+/** Cue 1: a single LED glow. */
+function LedGlow({ glowTexture, reduced }: { glowTexture: THREE.Texture; reduced: boolean }) {
+  const halo = React.useRef<THREE.Sprite>(null);
+
+  useFrame(({ clock }) => {
+    if (reduced || !halo.current) return;
+    const breathe = 0.92 + Math.sin(clock.elapsedTime * 0.55) * 0.06;
+    halo.current.scale.setScalar(1.5 * breathe);
+  });
+
+  return (
+    <group position={[-2.05, 0.86, -0.35]}>
+      <sprite ref={halo} scale={1.5}>
+        <spriteMaterial
+          map={glowTexture}
+          color={BLUE}
+          transparent
+          opacity={0.5}
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+        />
+      </sprite>
+      <mesh>
+        <sphereGeometry args={[0.13, 22, 22]} />
+        <meshStandardMaterial color="#dff3ff" emissive={BLUE} emissiveIntensity={1.5} roughness={0.15} />
+      </mesh>
+      <mesh position={[0, -0.16, 0]}>
+        <cylinderGeometry args={[0.09, 0.12, 0.16, 20]} />
+        <meshStandardMaterial color="#2a3a52" metalness={0.85} roughness={0.35} />
+      </mesh>
+      <pointLight color={BLUE} intensity={2.4} distance={4} />
+    </group>
+  );
+}
+
+/** Cue 2: modular-switch geometry, matte and quiet, behind the hero. */
+function ModularSwitch() {
+  const plate = useDisposable(() => makePlateGeometry(0.86, 1.1, 0.14, 0.07, 0.02), []);
+  const rocker = useDisposable(() => makePlateGeometry(0.3, 0.5, 0.06, 0.05, 0.014), []);
+
+  return (
+    <group position={[1.92, 0.5, -1.15]} rotation={[0.1, -0.5, 0.05]}>
+      <mesh geometry={plate}>
+        <meshStandardMaterial color="#1c2739" metalness={0.35} roughness={0.62} />
+      </mesh>
+      <mesh geometry={rocker} position={[0, 0.06, 0.06]}>
+        <meshStandardMaterial color="#2b3a53" metalness={0.3} roughness={0.5} />
+      </mesh>
+      <mesh position={[0, -0.36, 0.07]}>
+        <circleGeometry args={[0.032, 16]} />
+        <meshBasicMaterial color={BLUE} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Fake contact shadow — grounds the composition without a shadow map. */
+function ContactShadow({ texture }: { texture: THREE.Texture }) {
+  return (
+    <mesh position={[0.1, -1.06, 0.4]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[5.4, 3.2]} />
+      <meshBasicMaterial map={texture} transparent opacity={0.62} depthWrite={false} color="#03060d" />
+    </mesh>
+  );
+}
+
+/* -------------------------------------------------------------------- scene */
+
+function Scene({ reduced }: { reduced: boolean }) {
+  const { gl } = useThree();
+  const curve = useCircuitCurve();
+
+  const glowTexture = useDisposable(
+    () =>
+      makeRadialTexture([
+        [0, "rgba(255,255,255,1)"],
+        [0.35, "rgba(255,255,255,0.42)"],
+        [1, "rgba(255,255,255,0)"],
+      ]),
+    []
+  );
+  const shadowTexture = useDisposable(
+    () =>
+      makeRadialTexture(
+        [
+          [0, "rgba(255,255,255,0.95)"],
+          [0.55, "rgba(255,255,255,0.35)"],
+          [1, "rgba(255,255,255,0)"],
+        ],
+        160
+      ),
     []
   );
 
-  // Branch lines to electrical items
-  const branchLines = React.useMemo(() => {
-    const lines: THREE.Vector3[][] = [
-      // Bulb branch
-      [new THREE.Vector3(-2.8, 1.2, 0), new THREE.Vector3(-2.2, 1.5, -0.2)],
-      // Switch branch
-      [new THREE.Vector3(-1.8, 1.0, 0.2), new THREE.Vector3(-1.9, -0.6, -0.1)],
-      // MCB branch
-      [new THREE.Vector3(-1.2, 0.2, 0.3), new THREE.Vector3(-1.0, -1.2, 0)],
-      // Cable branch
-      [new THREE.Vector3(-0.4, -0.2, 0.4), new THREE.Vector3(-0.6, 1.3, 0.1)],
-      // Membership to Reward token
-      [new THREE.Vector3(0.5, 0.1, 0.3), new THREE.Vector3(1.4, -0.4, 0.2)],
-      [new THREE.Vector3(1.4, -0.4, 0.2), new THREE.Vector3(2.4, 0.2, 0)],
-    ];
-    return lines.map((pts) => new THREE.BufferGeometry().setFromPoints(pts));
-  }, []);
+  React.useEffect(() => {
+    gl.toneMapping = THREE.ACESFilmicToneMapping;
+    gl.toneMappingExposure = 1.05;
+  }, [gl]);
 
-  // Moving tokens along the spline
-  const tokenCount = 4;
-  const tokenMeshes = React.useRef<THREE.Mesh[]>([]);
-
-  useFrame((state) => {
-    if (reduced) return;
-    const t = state.clock.elapsedTime;
-
-    // Move energy tokens along curve
-    tokenMeshes.current.forEach((mesh, index) => {
-      if (!mesh) return;
-      const speed = 0.12;
-      const offset = (index / tokenCount) + t * speed;
-      const progress = offset % 1;
-      const pt = curve.getPointAt(progress);
-      mesh.position.copy(pt);
-
-      // Scale token: grows as it approaches reward vault
-      const sc = 0.07 + progress * 0.05;
-      mesh.scale.set(sc, sc, sc);
-    });
-
-    // Pulse line opacity gently
-    if (lineMat) {
-      lineMat.opacity = 0.35 + Math.sin(t * 2) * 0.15;
-    }
-  });
-
-  React.useEffect(
-    () => () => {
-      lineGeo.dispose();
-      lineMat.dispose();
-      branchLines.forEach((g) => g.dispose());
-    },
-    [lineGeo, lineMat, branchLines]
-  );
-
-  return (
-    <group>
-      {/* Main Spline Line */}
-      <primitive object={new THREE.Line(lineGeo, lineMat)} />
-
-      {/* Branch Lines */}
-      {branchLines.map((geo, i) => (
-        <primitive
-          key={i}
-          object={
-            new THREE.Line(
-              geo,
-              new THREE.LineBasicMaterial({ color: i % 2 === 0 ? COLOR_BLUE_GLOW : COLOR_GOLD_TOKEN, transparent: true, opacity: 0.3 })
-            )
-          }
-        />
-      ))}
-
-      {/* Flowing Energy Point Tokens */}
-      <group ref={pulseGroupRef}>
-        {Array.from({ length: tokenCount }).map((_, i) => (
-          <mesh
-            key={i}
-            ref={(el) => {
-              if (el) tokenMeshes.current[i] = el;
-            }}
-          >
-            <sphereGeometry args={[1, 14, 14]} />
-            <meshBasicMaterial color={i % 2 === 0 ? "#38bdf8" : "#fbbf24"} />
-          </mesh>
-        ))}
-      </group>
-    </group>
-  );
-}
-
-/**
- * Background Subtle Circuit Grid Plane
- */
-function CircuitGridPlane() {
-  const gridPoints = React.useMemo(() => {
-    const pts: THREE.Vector3[] = [];
-    const step = 0.6;
-    for (let x = -4; x <= 4; x += step) {
-      for (let y = -3; y <= 3; y += step) {
-        if ((Math.abs(x) + Math.abs(y)) % (step * 2) < 0.01) {
-          pts.push(new THREE.Vector3(x, y, -0.8));
-        }
-      }
-    }
-    return pts;
-  }, []);
-
-  const dotGeo = React.useMemo(() => new THREE.PlaneGeometry(0.03, 0.03), []);
-  const dotMat = React.useMemo(() => new THREE.MeshBasicMaterial({ color: "#1e3a8a", transparent: true, opacity: 0.4 }), []);
-
-  React.useEffect(
-    () => () => {
-      dotGeo.dispose();
-      dotMat.dispose();
-    },
-    [dotGeo, dotMat]
-  );
-
-  return (
-    <group>
-      {gridPoints.map((pt, i) => (
-        <mesh key={i} geometry={dotGeo} material={dotMat} position={pt} />
-      ))}
-    </group>
-  );
-}
-
-/**
- * Subtle Camera Rig that responds gently to cursor
- */
-function CameraRig({ reduced }: { reduced: boolean }) {
-  const { camera } = useThree();
-  useFrame((state) => {
-    if (reduced) return;
-    const { x, y } = state.pointer;
-    camera.position.x += (x * 0.35 - camera.position.x) * 0.03;
-    camera.position.y += (y * 0.2 - camera.position.y) * 0.03;
-    camera.lookAt(0, 0, 0);
-  });
-  return null;
-}
-
-/**
- * Scene Assembly
- */
-function Scene({ reduced }: { reduced: boolean }) {
   return (
     <>
-      <ambientLight intensity={0.8} />
-      <directionalLight position={[4, 5, 4]} intensity={1.2} color="#ffffff" />
-      <pointLight position={[-2.5, 1.5, 2]} intensity={12} color="#38bdf8" distance={8} />
-      <pointLight position={[2.4, 0.2, 2]} intensity={14} color="#f59e0b" distance={8} />
-      <pointLight position={[0, -1, 1.5]} intensity={6} color="#3b82f6" distance={6} />
+      {/* Lighting: one key, one cool fill, one warm reward rim */}
+      <ambientLight intensity={0.35} color="#93b4e0" />
+      <directionalLight position={[-3.4, 4.2, 3.6]} intensity={2.1} color="#e9f3ff" />
+      <directionalLight position={[3.2, 1.4, 2.2]} intensity={0.85} color="#ffd486" />
+      <pointLight position={[-1.4, -1.6, 2.4]} intensity={2.4} color={BLUE_DEEP} distance={7} />
 
-      <CameraRig reduced={reduced} />
-      <CircuitGridPlane />
-      <CircuitNetwork reduced={reduced} />
-
-      {/* 1. Electrical Purchases Cluster (Left) */}
-      <LedBulb position={[-2.4, 1.1, 0]} scale={0.9} reduced={reduced} />
-      <ModularSwitch position={[-2.1, -0.7, 0]} scale={0.85} reduced={reduced} />
-      <McbBreaker position={[-1.1, -1.1, 0.1]} scale={0.85} reduced={reduced} />
-      <CableSpool position={[-0.8, 1.2, 0.1]} scale={0.85} reduced={reduced} />
-
-      {/* 2. Customer Membership Card (Center-Right) */}
-      <MembershipCard3D position={[0.5, -0.05, 0.3]} scale={1.05} reduced={reduced} />
-
-      {/* 3. Reward Point Token (Right) */}
-      <RewardToken3D position={[2.4, 0.1, 0.1]} scale={1.15} reduced={reduced} />
+      <ContactShadow texture={shadowTexture} />
+      <CircuitLine curve={curve} />
+      <CurrentPulse curve={curve} glowTexture={glowTexture} reduced={reduced} />
+      <LedGlow glowTexture={glowTexture} reduced={reduced} />
+      <ModularSwitch />
+      <MembershipCard reduced={reduced} />
+      <RewardToken glowTexture={glowTexture} reduced={reduced} />
     </>
   );
 }
 
-/**
- * Static SVG / CSS Fallback visual.
- * Displays immediately while Three.js loads, or if WebGL is disabled.
- */
-export function AuthVisualFallback({ className }: { className?: string }) {
-  return (
-    <div className={`relative flex h-full w-full items-center justify-center overflow-hidden bg-slate-950 p-6 ${className || ""}`} aria-hidden="true">
-      {/* Background Circuit Grid Pattern */}
-      <div className="absolute inset-0 grid-lines opacity-10" />
+/* ------------------------------------------------------------------- public */
 
-      {/* Subtle Radial Glows */}
-      <div className="absolute left-1/4 top-1/3 size-72 rounded-full bg-brand-500/15 blur-3xl" />
-      <div className="absolute right-1/4 bottom-1/3 size-72 rounded-full bg-amber-500/15 blur-3xl" />
-
-      {/* Diagram Container */}
-      <div className="relative z-10 flex w-full max-w-lg items-center justify-between gap-4">
-        {/* Left: Electrical Purchases */}
-        <div className="flex flex-col items-center gap-3">
-          <div className="relative flex size-14 items-center justify-center rounded-2xl border border-sky-400/30 bg-sky-950/40 text-sky-400 shadow-lg shadow-sky-500/10">
-            <svg viewBox="0 0 24 24" className="size-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              {/* LED Bulb */}
-              <path d="M9 18h6" />
-              <path d="M10 22h4" />
-              <path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14" />
-            </svg>
-            <span className="absolute -top-1 -right-1 flex size-3">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-60" />
-              <span className="relative inline-flex size-3 rounded-full bg-sky-500" />
-            </span>
-          </div>
-          <span className="text-center text-[11px] font-medium uppercase tracking-wider text-sky-300/80">
-            Electrical Purchase
-          </span>
-        </div>
-
-        {/* Trace 1 */}
-        <div className="relative flex flex-1 items-center justify-center">
-          <div className="h-0.5 w-full bg-gradient-to-r from-sky-500/40 via-sky-400 to-sky-500/40" />
-          <div className="absolute size-2.5 rounded-full bg-sky-400 shadow-[0_0_8px_#38bdf8]" />
-        </div>
-
-        {/* Center: Membership */}
-        <div className="flex flex-col items-center gap-3">
-          <div className="flex size-14 items-center justify-center rounded-2xl border border-blue-400/40 bg-blue-950/50 text-blue-300 shadow-lg shadow-blue-500/15">
-            <svg viewBox="0 0 24 24" className="size-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <rect width="20" height="14" x="2" y="5" rx="2" />
-              <line x1="2" x2="22" y1="10" y2="10" />
-            </svg>
-          </div>
-          <span className="text-center text-[11px] font-medium uppercase tracking-wider text-blue-200/80">
-            Member ID
-          </span>
-        </div>
-
-        {/* Trace 2 */}
-        <div className="relative flex flex-1 items-center justify-center">
-          <div className="h-0.5 w-full bg-gradient-to-r from-blue-500/40 via-amber-400 to-amber-500/40" />
-          <div className="absolute size-2.5 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24]" />
-        </div>
-
-        {/* Right: Reward Points */}
-        <div className="flex flex-col items-center gap-3">
-          <div className="relative flex size-14 items-center justify-center rounded-2xl border border-amber-400/40 bg-amber-950/40 text-amber-400 shadow-lg shadow-amber-500/15">
-            <svg viewBox="0 0 24 24" className="size-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 7v10" />
-              <path d="M15 9.5a2.5 2.5 0 0 0-5 0c0 2 5 2 5 4.5a2.5 2.5 0 0 1-5 0" />
-            </svg>
-            <span className="absolute -top-1 -right-1 flex size-3">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-60" />
-              <span className="relative inline-flex size-3 rounded-full bg-amber-500" />
-            </span>
-          </div>
-          <span className="text-center text-[11px] font-medium uppercase tracking-wider text-amber-300/80">
-            Reward Points
-          </span>
-        </div>
-      </div>
-    </div>
-  );
+function useReducedMotion() {
+  const [reduced, setReduced] = React.useState(false);
+  React.useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduced(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  return reduced;
 }
 
-/**
- * Main AuthVisual Export Component
- */
+function useTabVisible() {
+  const [visible, setVisible] = React.useState(true);
+  React.useEffect(() => {
+    const update = () => setVisible(document.visibilityState === "visible");
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  return visible;
+}
+
 export function AuthVisual({ className }: { className?: string }) {
   const reduced = useReducedMotion();
-  const [mounted, setMounted] = React.useState(false);
-  const [hasWebGl, setHasWebGl] = React.useState(true);
-
-  React.useEffect(() => {
-    setMounted(true);
-    // Quick WebGL support probe
-    try {
-      const canvas = document.createElement("canvas");
-      const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
-      if (!gl) setHasWebGl(false);
-    } catch {
-      setHasWebGl(false);
-    }
-  }, []);
-
-  if (!mounted || !hasWebGl) {
-    return <AuthVisualFallback className={className} />;
-  }
+  const visible = useTabVisible();
 
   return (
-    <div className={`relative overflow-hidden ${className || ""}`} aria-hidden="true">
-      {/* Background radial glow */}
-      <div className="pointer-events-none absolute left-[-10%] top-1/4 size-[28rem] rounded-full bg-brand-500/15 blur-[100px]" />
-      <div className="pointer-events-none absolute right-[-10%] bottom-1/4 size-[28rem] rounded-full bg-amber-500/10 blur-[100px]" />
-
+    <div className={`pointer-events-none absolute inset-0 ${className || ""}`} aria-hidden="true">
       <Canvas
-        camera={{ position: [0, 0, 5.8], fov: 44 }}
-        dpr={[1, 1.5]}
-        frameloop={reduced ? "demand" : "always"}
-        gl={{
-          antialias: true,
-          alpha: true,
-          powerPreference: "low-power",
-        }}
+        camera={{ position: [0.35, 1.05, 6.15], fov: 32 }}
+        dpr={[1, 1.75]}
+        frameloop={reduced || !visible ? "demand" : "always"}
+        gl={{ antialias: true, alpha: true, powerPreference: "low-power" }}
         style={{ width: "100%", height: "100%" }}
+        onCreated={({ camera }) => camera.lookAt(0.05, -0.02, 0)}
       >
         <Scene reduced={reduced} />
       </Canvas>
