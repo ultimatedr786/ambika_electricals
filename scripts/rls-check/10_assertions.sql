@@ -1029,3 +1029,398 @@ begin
 end $$;
 reset role;
 
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- L cases — points ledger (Slice 1). Cases COMMIT, and ledger rows are
+-- immutable, so every case creates its own fresh memberships and uses unique
+-- idempotency keys. Balances therefore start at 0 and are absolute-asserted.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- CASE: L1 ledger — store-scoped staff awards points; cache, balance_after and audit stay in sync
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_bal int; v_n int;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L1 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 120,
+                             'sale', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l1-earn-1', 'L1 sale')
+    into v_res;
+  if (v_res ->> 'balance_after')::int <> 120 then raise exception 'ASSERT: L1 balance_after wrong: %', v_res; end if;
+  if (v_res ->> 'replayed')::boolean then raise exception 'ASSERT: L1 first call reported replay'; end if;
+
+  select public.point_balance(v_mem) into v_bal;
+  if v_bal <> 120 then raise exception 'ASSERT: L1 point_balance % <> 120', v_bal; end if;
+
+  select count(*) into v_n from public.customer_points_balance
+   where customer_membership_id = v_mem and lifetime_earned = 120 and lifetime_redeemed = 0;
+  if v_n <> 1 then raise exception 'ASSERT: L1 cache row not maintained'; end if;
+
+  execute 'reset role';
+  select count(*) into v_n from public.audit_logs
+   where action = 'points.awarded' and target_id = v_mem::text;
+  if v_n <> 1 then raise exception 'ASSERT: L1 points.awarded audit missing'; end if;
+end $$;
+
+-- CASE: L2 ledger — customers and other-tenant owners cannot award points (42501)
+do $$
+declare
+  v_mem uuid;
+begin
+  -- reuse Rahul's seeded membership (one membership per profile is enforced)
+  select id into v_mem from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+
+  -- Rahul (customer) tries to award himself
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 500, 'manual');
+    raise exception 'ASSERT: L2 customer awarded points';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Volt & Co owner tries to award into the Ambika tenant
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 500, 'manual');
+    raise exception 'ASSERT: L2 cross-tenant owner awarded points';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: L3 ledger — store-scoped staff are confined to their stores; managers are not
+do $$
+declare
+  v_mem uuid; v_res jsonb;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L3 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+
+  -- staff-main (scoped to Main Store) may NOT award at the Satellite store
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 40,
+                                'sale', null, 'bbbbbbbb-0000-4000-8000-000000000002', 'l3-staff-sat', null);
+    raise exception 'ASSERT: L3 store-scoped staff awarded outside their store';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- manager (unscoped) MAY award at the Satellite store
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 40,
+                             'sale', null, 'bbbbbbbb-0000-4000-8000-000000000002', 'l3-mgr-sat', null)
+    into v_res;
+  if (v_res ->> 'balance_after')::int <> 40 then raise exception 'ASSERT: L3 manager award failed: %', v_res; end if;
+
+  -- staff-satellite (scoped to Satellite) MAY award at Satellite
+  perform set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 10,
+                             'sale', null, 'bbbbbbbb-0000-4000-8000-000000000002', 'l3-staffsat-sat', null)
+    into v_res;
+  if (v_res ->> 'balance_after')::int <> 50 then raise exception 'ASSERT: L3 satellite staff award failed: %', v_res; end if;
+  execute 'reset role';
+end $$;
+
+-- CASE: L4 ledger — idempotency key makes awards replay-safe (no double earn)
+do $$
+declare
+  v_mem uuid; v_res1 jsonb; v_res2 jsonb; v_n int; v_bal int;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L4 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 75,
+                             'sale', null, null, 'l4-double-post', null) into v_res1;
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 75,
+                             'sale', null, null, 'l4-double-post', null) into v_res2;
+
+  if not (v_res2 ->> 'replayed')::boolean then raise exception 'ASSERT: L4 second call did not report replay'; end if;
+  if (v_res1 ->> 'entry_id') <> (v_res2 ->> 'entry_id') then raise exception 'ASSERT: L4 replay returned a different entry'; end if;
+
+  select count(*) into v_n from public.points_ledger
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and idempotency_key = 'l4-double-post';
+  if v_n <> 1 then raise exception 'ASSERT: L4 duplicate ledger entries: %', v_n; end if;
+
+  select public.point_balance(v_mem) into v_bal;
+  if v_bal <> 75 then raise exception 'ASSERT: L4 balance % after replay, expected 75', v_bal; end if;
+  execute 'reset role';
+end $$;
+
+-- CASE: L5 ledger — manager spends points (negative entry, cache + audit updated); staff may not spend
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_pts int; v_n int;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L5 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+
+  -- staff cannot spend
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 200, 'sale', null, null, 'l5-earn', null) into v_res;
+  begin
+    perform public.spend_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 50, 'redemption', null, null, 'l5-staff-spend', null);
+    raise exception 'ASSERT: L5 staff spent points';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- manager can
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.spend_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 50, 'redemption', null, null, 'l5-mgr-spend', null) into v_res;
+  if (v_res ->> 'balance_after')::int <> 150 then raise exception 'ASSERT: L5 balance_after % <> 150', v_res; end if;
+
+  select points into v_pts from public.points_ledger
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and idempotency_key = 'l5-mgr-spend';
+  if v_pts <> -50 then raise exception 'ASSERT: L5 redeem entry not stored negative: %', v_pts; end if;
+
+  select count(*) into v_n from public.customer_points_balance
+   where customer_membership_id = v_mem and current_points = 150 and lifetime_earned = 200 and lifetime_redeemed = 50;
+  if v_n <> 1 then raise exception 'ASSERT: L5 cache totals wrong'; end if;
+  execute 'reset role';
+
+  select count(*) into v_n from public.audit_logs
+   where action = 'points.redeemed' and target_id = v_mem::text;
+  if v_n <> 1 then raise exception 'ASSERT: L5 points.redeemed audit missing'; end if;
+end $$;
+
+-- CASE: L6 ledger — overspending is refused with insufficient_points
+do $$
+declare
+  v_mem uuid; v_msg text;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L6 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.spend_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 10000, 'redemption', null, null, 'l6-overspend', null);
+    raise exception 'ASSERT: L6 overspend was allowed';
+  exception when invalid_parameter_value then
+    v_msg := SQLERRM;
+    if position('insufficient_points' in v_msg) = 0 then
+      raise exception 'ASSERT: L6 wrong 22023 message: %', v_msg;
+    end if;
+  end;
+
+  -- balance still zero, and nothing was written
+  if public.point_balance(v_mem) <> 0 then raise exception 'ASSERT: L6 balance changed after refused spend'; end if;
+  execute 'reset role';
+end $$;
+
+-- CASE: L7 ledger — owner-only adjustments require a reason and cannot overdraw
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_bal int; v_n int;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L7 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 100, 'welcome', null, null, 'l7-earn', null) into v_res;
+
+  -- manager cannot adjust
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.adjust_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, -30, 'manager correction');
+    raise exception 'ASSERT: L7 manager adjusted points';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- owner can, with a reason
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    perform public.adjust_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, -30, '   ');
+    raise exception 'ASSERT: L7 blank reason accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.adjust_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, -5000, 'overdraw attempt');
+    raise exception 'ASSERT: L7 overdraw accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  select public.adjust_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, -30, 'Goodwill correction') into v_res;
+  if (v_res ->> 'balance_after')::int <> 70 then raise exception 'ASSERT: L7 balance_after % <> 70', v_res; end if;
+  select public.point_balance(v_mem) into v_bal;
+  if v_bal <> 70 then raise exception 'ASSERT: L7 point_balance % <> 70', v_bal; end if;
+
+  -- lifetime totals untouched by adjustments
+  select count(*) into v_n from public.customer_points_balance
+   where customer_membership_id = v_mem and lifetime_earned = 100 and lifetime_redeemed = 0;
+  if v_n <> 1 then raise exception 'ASSERT: L7 lifetimes should ignore adjustments'; end if;
+  execute 'reset role';
+
+  select count(*) into v_n from public.audit_logs
+   where action = 'points.adjusted' and target_id = v_mem::text;
+  if v_n <> 1 then raise exception 'ASSERT: L7 points.adjusted audit missing'; end if;
+end $$;
+
+-- CASE: L8 ledger — append-only: no DML grants for API roles; trigger blocks mutation even for postgres
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_id bigint;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L8 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 60, 'manual', null, null, 'l8-earn', null) into v_res;
+  v_id := (v_res ->> 'entry_id')::bigint;
+
+  -- authenticated has no INSERT/UPDATE/DELETE grant at all
+  begin
+    update public.points_ledger set reason = 'tampered' where id = v_id;
+    raise exception 'ASSERT: L8 authenticated updated the ledger';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    delete from public.points_ledger where id = v_id;
+    raise exception 'ASSERT: L8 authenticated deleted from the ledger';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update public.customer_points_balance set current_points = 999999 where customer_membership_id = v_mem;
+    raise exception 'ASSERT: L8 authenticated updated the balance cache';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+
+  -- even postgres (superuser) hits the immutability trigger
+  begin
+    update public.points_ledger set points = 6000 where id = v_id;
+    raise exception 'ASSERT: L8 postgres updated the ledger';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    delete from public.points_ledger where id = v_id;
+    raise exception 'ASSERT: L8 postgres deleted from the ledger';
+  exception when invalid_parameter_value then null;
+  end;
+
+  if public.point_balance(v_mem) <> 60 then raise exception 'ASSERT: L8 balance changed despite blocked mutation'; end if;
+end $$;
+
+-- CASE: L9 ledger — RLS visibility: own history for customers, business-wide for staff+, never cross-tenant
+do $$
+declare
+  v_rahul_mem uuid; v_other_mem uuid; v_volt_mem uuid; v_res jsonb;
+  v_own int; v_total int;
+begin
+  -- reuse Rahul's seeded membership (one membership per profile is enforced)
+  select id into v_rahul_mem from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L9 Other Mem', 'active')
+  returning id into v_other_mem;
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000002', null, 'L9 Volt Mem', 'active')
+  returning id into v_volt_mem;
+
+  -- seed entries as staff-main (Ambika) and Volt owner (Volt)
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_rahul_mem, 30, 'manual', null, null, 'l9-rahul-1', null) into v_res;
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_other_mem, 31, 'manual', null, null, 'l9-other-1', null) into v_res;
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000002', v_volt_mem, 32, 'manual', null, null, 'l9-volt-1', null) into v_res;
+
+  -- Rahul sees his own memberships' entries (L9 + his seeded history) and nothing else
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_own from public.points_ledger
+   where customer_membership_id = v_rahul_mem and idempotency_key = 'l9-rahul-1';
+  if v_own <> 1 then raise exception 'ASSERT: L9 Rahul cannot see his own L9 entry, saw %', v_own; end if;
+  select count(*) into v_total from public.points_ledger where customer_membership_id = v_other_mem;
+  if v_total <> 0 then raise exception 'ASSERT: L9 Rahul sees % entries of another member, expected 0', v_total; end if;
+  select count(*) into v_total from public.points_ledger where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_total <> 0 then raise exception 'ASSERT: L9 Rahul sees % Volt entries, expected 0', v_total; end if;
+  select count(*) into v_own from public.customer_points_balance where customer_membership_id = v_rahul_mem;
+  if v_own <> 1 then raise exception 'ASSERT: L9 Rahul sees % balance rows for his membership, expected 1', v_own; end if;
+  select count(*) into v_total from public.customer_points_balance where customer_membership_id = v_other_mem;
+  if v_total <> 0 then raise exception 'ASSERT: L9 Rahul sees another member''s balance row'; end if;
+
+  -- staff-main sees all Ambika entries (L9: rahul + other) but nothing from Volt
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_total from public.points_ledger where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and idempotency_key like 'l9-%';
+  if v_total <> 2 then raise exception 'ASSERT: L9 staff sees % Ambika L9 entries, expected 2', v_total; end if;
+  select count(*) into v_total from public.points_ledger where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_total <> 0 then raise exception 'ASSERT: L9 staff sees % Volt entries, expected 0', v_total; end if;
+
+  -- Volt owner sees only Volt
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_total from public.points_ledger where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_total <> 0 then raise exception 'ASSERT: L9 Volt owner sees % Ambika entries, expected 0', v_total; end if;
+  execute 'reset role';
+end $$;
+
+-- CASE: L10 ledger — integrity guards: membership must exist, be active and belong to the entry's business
+do $$
+declare
+  v_mem uuid; v_res jsonb;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L10 Member', 'active')
+  returning id into v_mem;
+
+  -- RPC: membership from another business is refused
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 10, 'manual', null,
+                                'bbbbbbbb-0000-4000-8000-000000000009', 'l10-foreign-store', null);
+    raise exception 'ASSERT: L10 award into a foreign store was allowed';
+  exception when invalid_parameter_value then null;
+  end;
+  execute 'reset role';
+
+  -- direct insert (even as postgres) with a mismatched business is refused by the trigger
+  begin
+    insert into public.points_ledger
+      (business_id, customer_membership_id, entry_type, points, balance_after, source_type, idempotency_key)
+    values ('aaaaaaaa-0000-4000-8000-000000000002', v_mem, 'earn', 10, 10, 'import', 'l10-mismatch');
+    raise exception 'ASSERT: L10 business-mismatched insert was allowed';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- blocked memberships earn nothing (RPC + trigger both refuse)
+  update public.customer_memberships set status = 'blocked' where id = v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 10, 'manual', null, null, 'l10-blocked', null);
+    raise exception 'ASSERT: L10 award into a blocked membership was allowed';
+  exception when invalid_parameter_value then null;
+  end;
+  execute 'reset role';
+
+  begin
+    insert into public.points_ledger
+      (business_id, customer_membership_id, entry_type, points, balance_after, source_type, idempotency_key)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 'earn', 10, 10, 'import', 'l10-blocked-direct');
+    raise exception 'ASSERT: L10 direct insert into a blocked membership was allowed';
+  exception when invalid_parameter_value then null;
+  end;
+end $$;

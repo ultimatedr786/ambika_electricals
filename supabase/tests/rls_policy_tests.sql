@@ -71,7 +71,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(48);
+select plan(69);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -403,6 +403,157 @@ select is(
   extensions.sqlstate_as('anon', null, 'select count(*) from public.businesses'),
   '42501',
   'A1: anon cannot read businesses'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- L series — points ledger (Slice 1): append-only, RPC-only writes, cache in
+-- sync, staff+/manager+/owner boundaries, tenant isolation. The whole suite
+-- runs inside one rolled-back transaction, so the fixture membership and its
+-- immutable rows disappear on rollback.
+-- ---------------------------------------------------------------------------
+insert into public.customer_memberships (business_id, profile_id, display_name, status)
+values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'PGTAP Ledger Member', 'active');
+select set_config('app.ledger_mem', id::text, true)
+  from public.customer_memberships where display_name = 'PGTAP Ledger Member';
+
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.award_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 120, ''sale'', null, ''bbbbbbbb-0000-4000-8000-000000000001'', ''pgtap-l1'', null)',
+           current_setting('app.ledger_mem', true))),
+  'NO_ERROR',
+  'L1: store-scoped staff can award points into their store'
+);
+select is(
+  (select current_points from public.customer_points_balance
+    where customer_membership_id = current_setting('app.ledger_mem', true)::uuid),
+  120,
+  'L1: balance cache reflects the award'
+);
+select ok(
+  exists (select 1 from public.audit_logs where action = 'points.awarded'),
+  'L1: the award is audited'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.award_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 500, ''manual'')',
+           current_setting('app.ledger_mem', true))),
+  '42501',
+  'L2: customers cannot award points'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    format('select public.award_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 500, ''manual'')',
+           current_setting('app.ledger_mem', true))),
+  '42501',
+  'L2: other-tenant owners cannot award points'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.award_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 40, ''sale'', null, ''bbbbbbbb-0000-4000-8000-000000000002'', ''pgtap-l3'', null)',
+           current_setting('app.ledger_mem', true))),
+  '42501',
+  'L3: store-scoped staff cannot award outside their stores'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.award_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 120, ''sale'', null, ''bbbbbbbb-0000-4000-8000-000000000001'', ''pgtap-l1'', null)',
+           current_setting('app.ledger_mem', true))),
+  'NO_ERROR',
+  'L4: replaying an idempotency key succeeds without error'
+);
+select is(
+  (select count(*)::int from public.points_ledger where idempotency_key = 'pgtap-l1'),
+  1,
+  'L4: a replayed award does not double-post'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.spend_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 50, ''redemption'', null, null, ''pgtap-l5-spend'', null)',
+           current_setting('app.ledger_mem', true))),
+  'NO_ERROR',
+  'L5: managers can spend member points'
+);
+select is(
+  (select points from public.points_ledger where idempotency_key = 'pgtap-l5-spend'),
+  -50,
+  'L5: spends are stored as negative entries'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.spend_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 10, ''redemption'', null, null, ''pgtap-l5-staff'', null)',
+           current_setting('app.ledger_mem', true))),
+  '42501',
+  'L5: staff cannot spend member points'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.spend_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, 100000, ''redemption'', null, null, ''pgtap-l6'', null)',
+           current_setting('app.ledger_mem', true))),
+  '22023',
+  'L6: overspending is refused (insufficient_points)'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.adjust_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, -30, ''manager correction'')',
+           current_setting('app.ledger_mem', true))),
+  '42501',
+  'L7: managers cannot adjust points'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    format('select public.adjust_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, -30, ''   '')',
+           current_setting('app.ledger_mem', true))),
+  '22023',
+  'L7: adjustments require a real reason'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    format('select public.adjust_points(''aaaaaaaa-0000-4000-8000-000000000001'', %L::uuid, -20, ''Goodwill correction'', ''pgtap-l7'')',
+           current_setting('app.ledger_mem', true))),
+  'NO_ERROR',
+  'L7: the owner can adjust points with a reason'
+);
+select is(
+  (select current_points from public.customer_points_balance
+    where customer_membership_id = current_setting('app.ledger_mem', true)::uuid),
+  50,
+  'L7: earn/spend/adjust keep the cache exact (120-50-20)'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    format('update public.points_ledger set points = 1 where customer_membership_id = %L::uuid',
+           current_setting('app.ledger_mem', true))),
+  '22023',
+  'L8: the ledger is immutable even for postgres'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    format('delete from public.points_ledger where customer_membership_id = %L::uuid',
+           current_setting('app.ledger_mem', true))),
+  '42501',
+  'L8: API roles have no ledger DML grants at all'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select count(*) from public.points_ledger where customer_membership_id = %L::uuid',
+           current_setting('app.ledger_mem', true)))::int,
+  0,
+  'L9: customers cannot read ledger rows of memberships that are not theirs'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select count(*) from public.points_ledger where customer_membership_id = %L::uuid',
+           current_setting('app.ledger_mem', true)))::int,
+  3,
+  'L9: staff see their whole business ledger (earn+spend+adjust)'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    format('select count(*) from public.points_ledger where customer_membership_id = %L::uuid',
+           current_setting('app.ledger_mem', true)))::int,
+  0,
+  'L9: other tenants never see the ledger'
 );
 
 select * from finish();

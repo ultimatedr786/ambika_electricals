@@ -145,7 +145,83 @@ values
    'aaaaaaaa-0000-4000-8000-000000000001', 'business',
    'aaaaaaaa-0000-4000-8000-000000000001', '{"origin":"dev-seed"}'::jsonb);
 
+-- ---------------------------------------------------------------------------
+-- Points ledger history for the seeded customers (Slice 1). Mirrors the
+-- launch policy: earn on purchases, redeem at the counter, never expire.
+-- balance_after is computed sequentially; the cache table is kept in sync.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_biz        uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  v_main_store uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
+  v_owner      uuid := '88888888-8888-4888-8888-888888888888';
+  v_staff_main uuid := '33333333-3333-4333-8333-333333333333';
+  v_rahul      uuid;
+  v_priya      uuid;
+  v_balance    int;
+  v_entry_id   bigint;
+begin
+  select id into v_rahul from public.customer_memberships where business_id = v_biz and membership_no = 'AE-DEVRAHUL1';
+  select id into v_priya from public.customer_memberships where business_id = v_biz and membership_no = 'AE-DEVPRIYA1';
+
+  -- Rahul: welcome +100, sale earn +450, sale earn +120, counter redeem −250 → 420
+  v_balance := 0;
+
+  v_balance := v_balance + 100;
+  insert into public.points_ledger
+    (business_id, customer_membership_id, entry_type, points, balance_after, source_type, store_id, actor_profile_id, reason, idempotency_key)
+  values (v_biz, v_rahul, 'earn', 100, v_balance, 'welcome', v_main_store, v_owner, 'Welcome bonus', 'seed-rahul-welcome')
+  returning id into v_entry_id;
+  insert into public.customer_points_balance (customer_membership_id, business_id, current_points, lifetime_earned, lifetime_redeemed, last_entry_id)
+  values (v_rahul, v_biz, v_balance, 100, 0, v_entry_id);
+
+  v_balance := v_balance + 450;
+  insert into public.points_ledger
+    (business_id, customer_membership_id, entry_type, points, balance_after, source_type, store_id, actor_profile_id, reason, idempotency_key)
+  values (v_biz, v_rahul, 'earn', 450, v_balance, 'sale', v_main_store, v_staff_main, 'Sale ₹4,500 (wiring order)', 'seed-rahul-sale-1')
+  returning id into v_entry_id;
+  update public.customer_points_balance
+     set current_points = v_balance, lifetime_earned = v_balance, last_entry_id = v_entry_id
+   where customer_membership_id = v_rahul;
+
+  v_balance := v_balance + 120;
+  insert into public.points_ledger
+    (business_id, customer_membership_id, entry_type, points, balance_after, source_type, store_id, actor_profile_id, reason, idempotency_key)
+  values (v_biz, v_rahul, 'earn', 120, v_balance, 'sale', v_main_store, v_staff_main, 'Sale ₹1,200 (LED bulbs)', 'seed-rahul-sale-2')
+  returning id into v_entry_id;
+  update public.customer_points_balance
+     set current_points = v_balance, lifetime_earned = v_balance, last_entry_id = v_entry_id
+   where customer_membership_id = v_rahul;
+
+  v_balance := v_balance - 250;
+  insert into public.points_ledger
+    (business_id, customer_membership_id, entry_type, points, balance_after, source_type, store_id, actor_profile_id, reason, idempotency_key)
+  values (v_biz, v_rahul, 'redeem', -250, v_balance, 'redemption', v_main_store, v_owner, 'Redeemed ₹25 off', 'seed-rahul-redeem-1')
+  returning id into v_entry_id;
+  update public.customer_points_balance
+     set current_points = v_balance, lifetime_redeemed = 250, last_entry_id = v_entry_id
+   where customer_membership_id = v_rahul;
+
+  -- Priya: welcome +100, birthday +50 → 150
+  v_balance := 100;
+  insert into public.points_ledger
+    (business_id, customer_membership_id, entry_type, points, balance_after, source_type, store_id, actor_profile_id, reason, idempotency_key)
+  values (v_biz, v_priya, 'earn', 100, v_balance, 'welcome', v_main_store, v_owner, 'Welcome bonus', 'seed-priya-welcome')
+  returning id into v_entry_id;
+  insert into public.customer_points_balance (customer_membership_id, business_id, current_points, lifetime_earned, lifetime_redeemed, last_entry_id)
+  values (v_priya, v_biz, v_balance, 100, 0, v_entry_id);
+
+  v_balance := v_balance + 50;
+  insert into public.points_ledger
+    (business_id, customer_membership_id, entry_type, points, balance_after, source_type, store_id, actor_profile_id, reason, idempotency_key)
+  values (v_biz, v_priya, 'earn', 50, v_balance, 'birthday', v_main_store, v_owner, 'Birthday bonus', 'seed-priya-birthday')
+  returning id into v_entry_id;
+  update public.customer_points_balance
+     set current_points = v_balance, lifetime_earned = v_balance, last_entry_id = v_entry_id
+   where customer_membership_id = v_priya;
+end $$;
+
 do $$
 begin
-  raise notice 'Dev seed complete: Ambika Electricals (owner dev-ambika-owner@ambika.local), manager, 2 store-scoped staff, customers Rahul/Priya, second tenant Volt & Co, 1 pending invitation (dev token devlocal0000...0000). No usable passwords exist — use Supabase Auth email flows locally.';
+  raise notice 'Dev seed complete: Ambika Electricals (owner dev-ambika-owner@ambika.local), manager, 2 store-scoped staff, customers Rahul/Priya, second tenant Volt & Co, 1 pending invitation (dev token devlocal0000...0000), points ledger history (Rahul 420 pts, Priya 150 pts). No usable passwords exist — use Supabase Auth email flows locally.';
 end $$;

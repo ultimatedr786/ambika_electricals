@@ -5,6 +5,25 @@ points ledger) · deliverable 8 of 8
 
 ---
 
+## ADDENDUM (2026-09-06) — Slice 1 delivered: immutable points ledger
+
+Item 1 of §4 below is **implemented and proven**:
+`supabase/migrations/20260906120000_points_ledger.sql` adds append-only
+`points_ledger` (+ `customer_points_balance` transactional cache per
+architecture proposal §A4), the RPCs `award_points` (staff+, store-scope
+aware), `spend_points` (manager+, no overdraw), `adjust_points` (owner-only,
+reason mandatory), `point_balance`, idempotency-key replay safety, full audit
+events (`points.awarded/redeemed/adjusted`) and RLS (own-memberships for
+customers, business-wide for staff+, SELECT-only grants, double-locked
+immutability). Seed now carries ledger history (Rahul 420 pts, Priya 150 pts).
+Harness: **52/52** (new L1–L10 series, `RLS_TEST_RESULTS.md` Run 2); pgTAP
+mirror extended to **69 assertions**. `RLS_POLICIES.md` matrix/RPC/test docs
+updated. UI/service integration deliberately lands with the sales slice (the
+next item in §4) so the ledger is never writable from a screen without a real
+sale/enrollment behind it.
+
+---
+
 ## 1. State at handoff
 
 - **Branch:** `arena/01a07266-ambika-electricals` (from `main` @ `04de463`).
