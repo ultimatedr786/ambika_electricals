@@ -2,10 +2,6 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
-} from "recharts";
 import { Download, IndianRupee, Repeat, Sparkles, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -16,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/shared/stat-card";
+import { CustomerLineChart, MetricAreaChart, PointsBarChart, TierPieChart } from "@/components/charts";
 import { useServices } from "@/lib/services";
 import { useStore } from "@/lib/store";
 import {
@@ -93,25 +90,7 @@ export default function AnalyticsPage() {
           </Tabs>
         </div>
         <div className="mt-4 h-[280px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={series} margin={{ left: -12, right: 8, top: 8 }}>
-              <defs>
-                <linearGradient id="an-grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#3182f6" stopOpacity={0.28} />
-                  <stop offset="100%" stopColor="#3182f6" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-              <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" />
-              <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" width={60}
-                tickFormatter={(v) => (metric === "revenue" ? `₹${Math.round(Number(v) / 1000)}k` : formatNumber(Number(v)))} />
-              <Tooltip
-                contentStyle={{ borderRadius: 10, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }}
-                formatter={(v) => [metric === "revenue" ? formatINR(Number(v)) : formatNumber(Number(v)), metric]}
-              />
-              <Area type="monotone" dataKey={metric} stroke="#3182f6" strokeWidth={2} fill="url(#an-grad)" />
-            </AreaChart>
-          </ResponsiveContainer>
+          <MetricAreaChart data={series} metric={metric} />
         </div>
       </Card>
 
@@ -123,37 +102,14 @@ export default function AnalyticsPage() {
             <span className="text-foreground">{Math.round((totals.redeemed / Math.max(1, totals.issued)) * 100)}% redemption rate</span>
           </p>
           <div className="mt-4 h-[240px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={series} margin={{ left: -12, right: 8, top: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" />
-                <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" width={50} tickFormatter={(v) => formatNumber(Number(v))} />
-                <Tooltip
-                  contentStyle={{ borderRadius: 10, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }}
-                  formatter={(v, n) => [formatNumber(Number(v)), String(n)]}
-                />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="issued" name="Issued" fill="#3182f6" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="redeemed" name="Redeemed" fill="#f5b409" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <PointsBarChart data={series} />
           </div>
         </Card>
 
         <Card className="p-5">
           <h2 className="text-sm font-semibold">Members by tier</h2>
           <div className="mt-2 h-[240px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={tierDistribution} dataKey="customers" nameKey="tier" innerRadius={52} outerRadius={82} paddingAngle={2}>
-                  {tierDistribution.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                </Pie>
-                <Tooltip
-                  contentStyle={{ borderRadius: 10, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }}
-                  formatter={(v, n) => [`${formatNumber(Number(v))} members`, String(n)]}
-                />
-              </PieChart>
-            </ResponsiveContainer>
+            <TierPieChart data={tierDistribution} palette={PALETTE} innerRadius={52} outerRadius={82} />
           </div>
           <div className="space-y-1.5">
             {tierDistribution.map((t, i) => (
@@ -198,18 +154,7 @@ export default function AnalyticsPage() {
           <h2 className="text-sm font-semibold">Customer growth</h2>
           <p className="text-xs text-muted-foreground">New members joining the programme</p>
           <div className="mt-4 h-[220px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={series} margin={{ left: -18, right: 8, top: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" />
-                <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="hsl(var(--muted-foreground))" width={44} />
-                <Tooltip
-                  contentStyle={{ borderRadius: 10, border: "1px solid hsl(var(--border))", background: "hsl(var(--popover))", fontSize: 12 }}
-                  formatter={(v) => [`${formatNumber(Number(v))} customers`, "Customers"]}
-                />
-                <Line type="monotone" dataKey="customers" stroke="#3182f6" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            <CustomerLineChart data={series} />
           </div>
         </Card>
       </div>

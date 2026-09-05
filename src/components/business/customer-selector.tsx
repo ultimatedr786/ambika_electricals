@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Users } from "lucide-react";
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+  Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { SearchInput } from "@/components/shared/search-input";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -43,8 +43,11 @@ export function CustomerSelector({
           <DialogTitle>Select customer</DialogTitle>
           <DialogDescription>Search by name, phone number or membership ID.</DialogDescription>
         </DialogHeader>
-        <SearchInput value={q} onChange={setQ} placeholder="Rahul Sharma, AE-10248, 98240…" autoFocus />
-        <div className="-mx-1 max-h-[52vh] space-y-1 overflow-y-auto px-1">
+        <div className="shrink-0 px-6 pb-3">
+          <SearchInput value={q} onChange={setQ} placeholder="Rahul Sharma, AE-10248, 98240…" autoFocus />
+        </div>
+        <DialogBody className="pb-6">
+        <div className="space-y-1">
           {results.length === 0 ? (
             <EmptyState icon={Users} title="No customer found" description="Try a different name, phone or membership ID." className="py-10" />
           ) : (
@@ -67,6 +70,7 @@ export function CustomerSelector({
             ))
           )}
         </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

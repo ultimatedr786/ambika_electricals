@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { cn, formatNumber, sleep } from "@/lib/utils";
@@ -147,6 +147,7 @@ export function CampaignWizard({ open, onOpenChange }: { open: boolean; onOpenCh
             <DialogDescription>Step {step + 1} of 5 · {steps[step]}</DialogDescription>
           </DialogHeader>
 
+          <div className="shrink-0 border-b px-6 pb-4">
           <div className="flex items-center gap-1.5" role="list" aria-label="Wizard progress">
             {steps.map((s, i) => (
               <div key={s} className="flex flex-1 items-center gap-1.5" role="listitem">
@@ -166,7 +167,10 @@ export function CampaignWizard({ open, onOpenChange }: { open: boolean; onOpenCh
             ))}
           </div>
 
-          <div className="min-h-[300px]">
+          </div>
+
+          <DialogBody className="py-4">
+          <div className="min-h-[280px]">
             <AnimatePresence mode="wait">
               <motion.div
                 key={step}
@@ -315,6 +319,8 @@ export function CampaignWizard({ open, onOpenChange }: { open: boolean; onOpenCh
 
           <Separator />
 
+          </DialogBody>
+
           <DialogFooter className="sm:justify-between">
             <Button variant="ghost" onClick={() => (step === 0 ? onOpenChange(false) : setStep((s) => s - 1))}>
               {step === 0 ? "Cancel" : <><ChevronLeft /> Back</>}
@@ -380,6 +386,7 @@ function AiAssistant({
           </DialogDescription>
         </DialogHeader>
 
+        <DialogBody className="pb-6">
         <div className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="aiprompt">Your goal</Label>
@@ -433,6 +440,7 @@ function AiAssistant({
             )}
           </AnimatePresence>
         </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

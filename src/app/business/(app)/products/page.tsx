@@ -15,10 +15,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
-} from "@/components/ui/dialog";
+import { Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { FormDialog } from "@/components/shared/form-dialog";
+import { ProductImagePicker } from "@/components/shared/product-image-picker";
 import { SearchInput } from "@/components/shared/search-input";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -47,8 +46,6 @@ const schema = z.object({
 });
 type Values = z.output<typeof schema>;
 type FormValues = z.input<typeof schema>;
-
-const artKeys = ["bulb", "tube", "panel", "flood", "smartbulb", "switch", "socket", "regulator", "wire", "mcb", "db", "fan", "holder", "plug", "conduit", "box", "tie", "gland", "tape", "extension"];
 
 export default function ProductsPage() {
   const { state } = useStore();
@@ -87,26 +84,36 @@ export default function ProductsPage() {
       .filter((p) => !t || `${p.name} ${p.brand} ${p.sku}`.toLowerCase().includes(t));
   }, [state.products, query, category, brand, stock, status]);
 
-  const submit = form.handleSubmit(async (values) => {
-    await productService.createProduct({
-      name: values.name,
-      brand: values.brand,
-      sku: values.sku.toUpperCase(),
-      subcategory: values.subcategory,
-      category: values.category as ProductCategory,
-      price: values.price,
-      mrp: values.mrp || undefined,
-      unit: values.unit,
-      stock: values.stock,
-      points: values.points,
-      image: values.image,
-      description: values.description || "",
-      status: values.status as "Active" | "Inactive",
-    });
-    setOpen(false);
-    form.reset();
-    toast.success("Product added successfully.");
-  });
+  const submit = form.handleSubmit(
+    async (values) => {
+      await productService.createProduct({
+        name: values.name,
+        brand: values.brand,
+        sku: values.sku.toUpperCase(),
+        subcategory: values.subcategory,
+        category: values.category as ProductCategory,
+        price: values.price,
+        mrp: values.mrp || undefined,
+        unit: values.unit,
+        stock: values.stock,
+        points: values.points,
+        image: values.image,
+        description: values.description || "",
+        status: values.status as "Active" | "Inactive",
+      });
+      setOpen(false);
+      form.reset();
+      toast.success("Product added successfully.");
+    },
+    (errors) => {
+      // Make sure the first invalid field is visible inside the scrolling body.
+      const first = Object.keys(errors)[0];
+      const el = document.querySelector<HTMLElement>(`[name="${first}"]`);
+      el?.scrollIntoView({ block: "center", behavior: "smooth" });
+      el?.focus({ preventScroll: true });
+    }
+  );
+
 
   const filterControls = (
     <div className="flex flex-wrap gap-2.5">
@@ -160,68 +167,7 @@ export default function ProductsPage() {
               <Button variant={view === "table" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("table")} aria-label="Table view"><List /></Button>
               <Button variant={view === "grid" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("grid")} aria-label="Grid view"><LayoutGrid /></Button>
             </div>
-            <Dialog open={open} onOpenChange={setOpen}>
-              <DialogTrigger asChild><Button><Plus /> Add Product</Button></DialogTrigger>
-              <DialogContent className="max-w-xl">
-                <DialogHeader>
-                  <DialogTitle>Add electrical product</DialogTitle>
-                  <DialogDescription>Add a new item to the Ambika Electricals catalogue.</DialogDescription>
-                </DialogHeader>
-                <form onSubmit={submit} className="space-y-4" noValidate>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="sm:col-span-2">
-                      <Field label="Product name" placeholder="Philips 9W LED Bulb" error={form.formState.errors.name?.message} {...form.register("name")} />
-                    </div>
-                    <SelectField
-                      label="Brand" value={form.watch("brand")} onChange={(v) => form.setValue("brand", v, { shouldValidate: true })}
-                      options={brands} placeholder="Select brand" error={form.formState.errors.brand?.message}
-                    />
-                    <Field label="SKU" placeholder="AMB-LGT-009" error={form.formState.errors.sku?.message} {...form.register("sku")} />
-                    <SelectField
-                      label="Category" value={form.watch("category")} onChange={(v) => form.setValue("category", v, { shouldValidate: true })}
-                      options={productCategories as unknown as string[]} placeholder="Select category" error={form.formState.errors.category?.message}
-                    />
-                    <Field label="Subcategory" placeholder="LED Bulbs" error={form.formState.errors.subcategory?.message} {...form.register("subcategory")} />
-                    <Field label="Price (₹)" inputMode="numeric" error={form.formState.errors.price?.message} {...form.register("price")} />
-                    <Field label="MRP (₹)" inputMode="numeric" error={form.formState.errors.mrp?.message} {...form.register("mrp")} />
-                    <SelectField
-                      label="Unit" value={form.watch("unit")} onChange={(v) => form.setValue("unit", v)}
-                      options={["piece", "coil", "metre", "pack", "set", "length"]}
-                    />
-                    <Field label="Stock" inputMode="numeric" error={form.formState.errors.stock?.message} {...form.register("stock")} />
-                    <Field label="Reward points" inputMode="numeric" error={form.formState.errors.points?.message} {...form.register("points")} />
-                    <SelectField label="Status" value={form.watch("status")} onChange={(v) => form.setValue("status", v)} options={["Active", "Inactive"]} />
-                    <div className="sm:col-span-2 space-y-1.5">
-                      <Label>Product image</Label>
-                      <div className="flex flex-wrap gap-2">
-                        {artKeys.map((k) => (
-                          <button
-                            key={k}
-                            type="button"
-                            onClick={() => form.setValue("image", k)}
-                            aria-label={`Use ${k} illustration`}
-                            aria-pressed={form.watch("image") === k}
-                            className={cn("rounded-lg border p-0.5 transition-all", form.watch("image") === k && "border-primary ring-1 ring-primary")}
-                          >
-                            <ProductArt art={k} className="size-10" />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="sm:col-span-2 space-y-1.5">
-                      <Label htmlFor="desc">Description</Label>
-                      <Textarea id="desc" placeholder="Short product description" {...form.register("description")} />
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-                    <Button type="submit" loading={form.formState.isSubmitting} disabled={!form.formState.isValid && form.formState.isSubmitted}>
-                      Add product
-                    </Button>
-                  </DialogFooter>
-                </form>
-              </DialogContent>
-            </Dialog>
+            <Button onClick={() => setOpen(true)}><Plus /> Add Product</Button>
           </>
         }
       />
@@ -307,12 +253,70 @@ export default function ProductsPage() {
       <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
         <SheetContent side="bottom">
           <SheetHeader><SheetTitle>Filters</SheetTitle></SheetHeader>
-          <div className="px-5 pb-8">
+          <SheetBody>
             <div className="[&_button]:w-full [&>div]:flex-col">{filterControls}</div>
-            <Button className="mt-4 w-full" onClick={() => setFiltersOpen(false)}>Apply</Button>
-          </div>
+          </SheetBody>
+          <SheetFooter>
+            <Button className="w-full" onClick={() => setFiltersOpen(false)}>Apply</Button>
+          </SheetFooter>
         </SheetContent>
       </Sheet>
+
+      {/* Add product — one responsive dialog/sheet pattern:
+          sticky header → scrollable fields → sticky actions. */}
+      <FormDialog
+        open={open}
+        onOpenChange={setOpen}
+        title="Add electrical product"
+        description="Add a new item to the Ambika Electricals catalogue."
+        size="lg"
+        onSubmit={submit}
+        footer={
+          <>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" loading={form.formState.isSubmitting}>Add product</Button>
+          </>
+        }
+      >
+        <div className="grid gap-4 py-2 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <Field label="Product name" placeholder="Philips 9W LED Bulb" error={form.formState.errors.name?.message} {...form.register("name")} />
+          </div>
+          <SelectField
+            label="Brand" value={form.watch("brand")} onChange={(v) => form.setValue("brand", v, { shouldValidate: true })}
+            options={brands} placeholder="Select brand" error={form.formState.errors.brand?.message}
+          />
+          <Field label="SKU" placeholder="AMB-LGT-009" error={form.formState.errors.sku?.message} {...form.register("sku")} />
+          <SelectField
+            label="Category" value={form.watch("category")} onChange={(v) => form.setValue("category", v, { shouldValidate: true })}
+            options={productCategories as unknown as string[]} placeholder="Select category" error={form.formState.errors.category?.message}
+          />
+          <Field label="Subcategory" placeholder="LED Bulbs" error={form.formState.errors.subcategory?.message} {...form.register("subcategory")} />
+          <Field label="Price (₹)" inputMode="numeric" error={form.formState.errors.price?.message} {...form.register("price")} />
+          <Field label="MRP (₹)" inputMode="numeric" error={form.formState.errors.mrp?.message} {...form.register("mrp")} />
+          <SelectField
+            label="Unit" value={form.watch("unit")} onChange={(v) => form.setValue("unit", v)}
+            options={["piece", "coil", "metre", "pack", "set", "length"]}
+          />
+          <Field label="Stock" inputMode="numeric" error={form.formState.errors.stock?.message} {...form.register("stock")} />
+          <Field label="Reward points" inputMode="numeric" error={form.formState.errors.points?.message} {...form.register("points")} />
+          <SelectField label="Status" value={form.watch("status")} onChange={(v) => form.setValue("status", v)} options={["Active", "Inactive"]} />
+
+          <div className="space-y-2 sm:col-span-2">
+            <Label htmlFor="product-visual">Product visual</Label>
+            <ProductImagePicker
+              id="product-visual"
+              value={form.watch("image")}
+              onChange={(v) => form.setValue("image", v, { shouldValidate: true })}
+            />
+          </div>
+
+          <div className="space-y-1.5 sm:col-span-2">
+            <Label htmlFor="desc">Description</Label>
+            <Textarea id="desc" placeholder="Short product description" {...form.register("description")} />
+          </div>
+        </div>
+      </FormDialog>
     </div>
   );
 }

@@ -9,9 +9,9 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetBody, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+  Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { SearchInput } from "@/components/shared/search-input";
@@ -183,10 +183,12 @@ export default function SalesPage() {
       <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
         <SheetContent side="bottom">
           <SheetHeader><SheetTitle>Filters</SheetTitle></SheetHeader>
-          <div className="px-5 pb-8">
+          <SheetBody>
             <div className="[&_button]:w-full [&>div]:flex-col">{filterControls}</div>
-            <Button className="mt-4 w-full" onClick={() => setFiltersOpen(false)}>Apply</Button>
-          </div>
+          </SheetBody>
+          <SheetFooter>
+            <Button className="w-full" onClick={() => setFiltersOpen(false)}>Apply</Button>
+          </SheetFooter>
         </SheetContent>
       </Sheet>
 
@@ -196,6 +198,7 @@ export default function SalesPage() {
             <DialogTitle>{open?.invoice}</DialogTitle>
             <DialogDescription>{open && formatDateTime(open.date)} · {open?.store}</DialogDescription>
           </DialogHeader>
+          <DialogBody className="pb-5">
           {open && (
             <div className="space-y-4">
               <div className="flex items-center justify-between rounded-xl border p-3.5">
@@ -230,6 +233,7 @@ export default function SalesPage() {
               </Button>
             </div>
           )}
+          </DialogBody>
         </DialogContent>
       </Dialog>
     </div>

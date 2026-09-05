@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { CheckCircle2, RefreshCw, ScanLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+  Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { TierBadge } from "@/components/shared/tier-badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -51,6 +51,7 @@ export function QRScanner({
           </DialogDescription>
         </DialogHeader>
 
+        <DialogBody className="pb-6">
         <AnimatePresence mode="wait">
           {phase === "scanning" ? (
             <motion.div key="scan" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -117,6 +118,7 @@ export function QRScanner({
             </motion.div>
           )}
         </AnimatePresence>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

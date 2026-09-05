@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -101,6 +101,7 @@ export default function RedemptionsPage() {
             <DialogTitle>Reward pass</DialogTitle>
             <DialogDescription>Show this at Ambika Electricals to collect your reward.</DialogDescription>
           </DialogHeader>
+          <DialogBody className="pb-6">
           {open && (
             <div className="text-center">
               <div className="mx-auto size-52 rounded-xl border bg-white p-3">
@@ -125,6 +126,7 @@ export default function RedemptionsPage() {
               </Button>
             </div>
           )}
+          </DialogBody>
         </DialogContent>
       </Dialog>
     </div>

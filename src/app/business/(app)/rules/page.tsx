@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { useStore } from "@/lib/store";
@@ -202,14 +202,20 @@ function RuleBuilder({ open, onOpenChange }: { open: boolean; onOpenChange: (v: 
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Create a reward rule</DialogTitle>
-          <DialogDescription>Pick a trigger, then choose what members earn.</DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-5">
+    <FormDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Create a reward rule"
+      description="Pick a trigger, then choose what members earn."
+      size="xl"
+      footer={
+        <>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={save} loading={saving} disabled={value <= 0}>Create rule</Button>
+        </>
+      }
+    >
+        <div className="space-y-5 py-2">
           <div>
             <Label className="mb-2 block">1. When this happens</Label>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -279,12 +285,6 @@ function RuleBuilder({ open, onOpenChange }: { open: boolean; onOpenChange: (v: 
             </p>
           </div>
         </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={save} loading={saving} disabled={value <= 0}>Create rule</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    </FormDialog>
   );
 }

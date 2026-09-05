@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { SearchInput } from "@/components/shared/search-input";
@@ -155,13 +155,19 @@ export default function StaffPage() {
         </div>
       </Card>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Invite a team member</DialogTitle>
-            <DialogDescription>They&apos;ll get access based on the role you choose.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
+      <FormDialog
+        open={open}
+        onOpenChange={setOpen}
+        title="Invite a team member"
+        description="They'll get access based on the role you choose."
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button onClick={invite} loading={saving} disabled={form.name.trim().length < 3 || !form.email.includes("@")}>Send invite</Button>
+          </>
+        }
+      >
+          <div className="space-y-4 py-2">
             <div className="space-y-1.5">
               <Label htmlFor="sname">Full name</Label>
               <Input id="sname" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Devang Rana" />
@@ -196,12 +202,7 @@ export default function StaffPage() {
               </ul>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={invite} loading={saving} disabled={form.name.trim().length < 3 || !form.email.includes("@")}>Send invite</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
     </div>
   );
 }

@@ -4,7 +4,7 @@ import * as React from "react";
 import { motion } from "framer-motion";
 import { QrCode, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetBody, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { QRCode } from "@/components/shared/qr-code";
 import { TierBadge } from "@/components/shared/tier-badge";
 import { LogoMark } from "@/components/shared/logo";
@@ -59,7 +59,8 @@ export function ShowQRSheet({
       </SheetTrigger>
       <SheetContent side="bottom" className="lg:mx-auto lg:max-w-md lg:rounded-t-2xl">
         <SheetTitle className="sr-only">Membership QR code</SheetTitle>
-        <div className="flex flex-col items-center px-6 pb-10 pt-6 text-center">
+        <SheetBody className="pb-10 pt-6">
+        <div className="flex flex-col items-center text-center">
           <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
             <Sparkles className="size-4 text-primary" /> Show this QR at checkout
           </div>
@@ -83,6 +84,7 @@ export function ShowQRSheet({
             Mock QR for demonstration. No personal or payment information is encoded.
           </p>
         </div>
+        </SheetBody>
       </SheetContent>
     </Sheet>
   );

@@ -19,7 +19,7 @@ import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FormDialog } from "@/components/shared/form-dialog";
 import { TierBadge } from "@/components/shared/tier-badge";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -274,13 +274,20 @@ export default function CustomerDetailPage() {
         </TabsContent>
       </Tabs>
 
-      <Dialog open={adjustOpen} onOpenChange={setAdjustOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Adjust points</DialogTitle>
-            <DialogDescription>Manually add or deduct points for {customer.name}.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
+      <FormDialog
+        open={adjustOpen}
+        onOpenChange={setAdjustOpen}
+        title="Adjust points"
+        description={`Manually add or deduct points for ${customer.name}.`}
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setAdjustOpen(false)}>Cancel</Button>
+            <Button onClick={applyAdjust} disabled={delta === 0 || !reason.trim()}>Apply adjustment</Button>
+          </>
+        }
+      >
+          <div className="space-y-4 py-2">
             <div className="flex items-center justify-center gap-4">
               <Button variant="outline" size="icon" onClick={() => setDelta((d) => d - 50)} aria-label="Decrease"><Minus /></Button>
               <Input
@@ -300,12 +307,7 @@ export default function CustomerDetailPage() {
               <Input id="reason" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Goodwill adjustment, festive bonus…" />
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAdjustOpen(false)}>Cancel</Button>
-            <Button onClick={applyAdjust} disabled={delta === 0 || !reason.trim()}>Apply adjustment</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </FormDialog>
     </div>
   );
 }

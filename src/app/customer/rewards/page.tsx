@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchInput } from "@/components/shared/search-input";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -203,9 +203,9 @@ export default function RewardsStorePage() {
               {activeFilterCount > 0 && <Badge className="ml-1">{activeFilterCount}</Badge>}
             </Button>
           </SheetTrigger>
-          <SheetContent side="bottom" className="max-h-[85vh]">
+          <SheetContent side="bottom" className="max-h-[85dvh]">
             <SheetHeader><SheetTitle>Filters</SheetTitle></SheetHeader>
-            <div className="px-5 pb-8">{filterPanel}</div>
+            <SheetBody className="pb-8">{filterPanel}</SheetBody>
           </SheetContent>
         </Sheet>
       </div>
