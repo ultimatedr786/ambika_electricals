@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Confirm your email</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f2f5fa;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;color:#12203a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f5fa;padding:32px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border:1px solid #dde5f1;border-radius:16px;overflow:hidden;">
+            <!-- Header -->
+            <tr>
+              <td style="background:#0b1526;padding:22px 28px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="color:#ffffff;font-size:16px;font-weight:700;letter-spacing:0.2px;">
+                      ⚡ Ambika Electricals <span style="color:#7dd3fc;font-weight:600;">Rewards</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="color:#93a7c7;font-size:11px;padding-top:2px;">Powered by Rewardly</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <!-- Body -->
+            <tr>
+              <td style="padding:28px;">
+                <p style="margin:0 0 12px;font-size:20px;font-weight:700;color:#0b1526;">Confirm your email</p>
+                <p style="margin:0 0 20px;font-size:14px;line-height:1.6;color:#415270;">
+                  Welcome! Enter this 6-digit code in the app to activate your rewards membership
+                  for <strong>{{ .Email }}</strong>.
+                </p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+                  <tr>
+                    <td align="center" style="background:#eef6ff;border:1px dashed #7dd3fc;border-radius:12px;padding:16px;">
+                      <span style="font-size:28px;font-weight:800;letter-spacing:8px;color:#0369a1;">{{ .Token }}</span>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:0 0 20px;font-size:13px;line-height:1.6;color:#415270;">
+                  Or confirm with one tap:
+                </p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+                  <tr>
+                    <td align="center">
+                      <a href="{{ .ConfirmationURL }}"
+                         style="display:inline-block;background:#0b1526;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:13px 28px;border-radius:10px;">
+                        Confirm email address
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:0 0 4px;font-size:12px;line-height:1.6;color:#7a8aa5;">
+                  The code expires in 10 minutes. Didn't request this? You can safely ignore this
+                  email — no account will be created.
+                </p>
+              </td>
+            </tr>
+            <!-- Footer -->
+            <tr>
+              <td style="background:#f7f9fd;border-top:1px solid #e5ebf5;padding:18px 28px;">
+                <p style="margin:0 0 6px;font-size:12px;line-height:1.6;color:#415270;">
+                  Need help? Email <a href="mailto:care@ambikaelectricals.in" style="color:#0369a1;">care@ambikaelectricals.in</a>
+                  or call <a href="tel:+919825041200" style="color:#0369a1;">+91 98250 41200</a>.
+                </p>
+                <p style="margin:0;font-size:11px;line-height:1.6;color:#93a3bd;">
+                  Ambika Electricals · Shop 14, Sardar Complex, Ring Road, Surat, Gujarat 395002
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

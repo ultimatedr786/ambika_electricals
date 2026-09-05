@@ -1,0 +1,1031 @@
+-- ============================================================================
+-- RLS / RPC assertion suite — Phase 2 Step 2 Stage D proof.
+--
+-- Runs on ANY PostgreSQL after: 00_stubs.sql → supabase/migrations/* →
+-- supabase/seed.sql. Executed case-by-case by scripts/rls-check/run.mjs;
+-- each `-- CASE:` block runs inside its own transaction, so a failure never
+-- corrupts later cases. Mirrors supabase/tests/rls_policy_tests.sql (pgTAP),
+-- which is the canonical runner under `supabase test db`.
+--
+-- Convention: an assertion failure raises  'ASSERT: <why>'.
+-- Fixed UUIDs come from supabase/seed.sql.
+-- ============================================================================
+
+-- CASE: S1 trigger — profile auto-created from auth.users
+do $$
+declare v_profile public.profiles; v_uid uuid := '70000000-1111-4000-8000-000000000001';
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_uid, 'authenticated', 'authenticated',
+          's1-trigger@ambika.local', '!', now(), '{"full_name":"Trigger Test"}'::jsonb);
+  select * into v_profile from public.profiles where id = v_uid;
+  if not found then raise exception 'ASSERT: profile was not created by handle_new_user'; end if;
+  if v_profile.email <> 's1-trigger@ambika.local' then raise exception 'ASSERT: profile email mismatch'; end if;
+  if v_profile.display_name <> 'Trigger Test' then raise exception 'ASSERT: display_name not taken from metadata, got %', v_profile.display_name; end if;
+  delete from auth.users where id = v_uid;  -- cascades profile
+end $$;
+
+-- CASE: S2 trigger — profile email follows auth email change
+do $$
+declare v_uid uuid := '70000000-1111-4000-8000-000000000002'; v_email text;
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_uid, 'authenticated', 'authenticated',
+          's2-before@ambika.local', '!', now(), '{"full_name":"Email Sync"}'::jsonb);
+  update auth.users set email = 's2-after@ambika.local', updated_at = now() where id = v_uid;
+  select email into v_email from public.profiles where id = v_uid;
+  if v_email <> 's2-after@ambika.local' then raise exception 'ASSERT: profile email not synced, got %', v_email; end if;
+  delete from auth.users where id = v_uid;
+end $$;
+
+-- CASE: S3 constraint — membership_no auto-generates in AE- format when omitted
+do $$
+declare v_no text;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, membership_no)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'Auto Numbering', null)
+  returning membership_no into v_no;
+  if v_no !~ '^AE-[A-Z0-9]{8}$' then raise exception 'ASSERT: generated membership_no has wrong shape: %', v_no; end if;
+  delete from public.customer_memberships where membership_no = v_no
+    and business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and display_name = 'Auto Numbering';
+end $$;
+
+-- CASE: S4 constraint — membership_no format check rejects garbage
+do $$
+begin
+  begin
+    insert into public.customer_memberships (business_id, membership_no, display_name)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'XX-1', 'Bad Number');
+    raise exception 'ASSERT: garbage membership_no was accepted';
+  exception when check_violation then null;
+  end;
+end $$;
+
+-- CASE: S5 constraint — store_membership with mismatched business rejected
+do $$
+begin
+  begin
+    insert into public.store_memberships (store_id, business_id, profile_id)
+    values ('bbbbbbbb-0000-4000-8000-000000000001',      -- Ambika Main Store
+            'aaaaaaaa-0000-4000-8000-000000000002',      -- Volt business  → mismatch
+            '33333333-3333-4333-8333-333333333333');
+    raise exception 'ASSERT: cross-tenant store_membership was accepted';
+  exception when integrity_constraint_violation then null;
+  end;
+end $$;
+
+-- CASE: S6 constraint — duplicate business membership rejected
+do $$
+begin
+  begin
+    insert into public.business_memberships (business_id, profile_id, role)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', '33333333-3333-4333-8333-333333333333', 'staff');
+    raise exception 'ASSERT: duplicate membership accepted';
+  exception when unique_violation then null;
+  end;
+end $$;
+
+-- CASE: S7 constraint — one pending invitation per email per business
+do $$
+begin
+  begin
+    insert into public.invitations (business_id, email, role, token_hash, expires_at, invited_by)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'dev-newstaff@ambika.local', 'staff',
+            encode(extensions.digest('duplicate-pending-token', 'sha256'), 'hex'),
+            now() + interval '1 day', '88888888-8888-4888-8888-888888888888');
+    raise exception 'ASSERT: second pending invitation for same email accepted';
+  exception when unique_violation then null;
+  end;
+end $$;
+
+-- CASE: S8 constraint — invitation role limited to manager/staff
+do $$
+begin
+  begin
+    insert into public.invitations (business_id, email, role, token_hash, expires_at, invited_by)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'x-owner@ambika.local', 'owner',
+            encode(extensions.digest('role-check-token', 'sha256'), 'hex'),
+            now() + interval '1 day', '88888888-8888-4888-8888-888888888888');
+    raise exception 'ASSERT: owner-role invitation accepted';
+  exception when check_violation then null;
+  end;
+end $$;
+
+-- CASE: S9 audit — audit_logs immutable even for the table owner
+do $$
+begin
+  begin
+    update public.audit_logs set action = 'tampered.hack' where action = 'business.created';
+    raise exception 'ASSERT: audit_logs UPDATE was permitted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    delete from public.audit_logs where action = 'business.created';
+    raise exception 'ASSERT: audit_logs DELETE was permitted';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+
+-- CASE: A1 anon — denied on every application table
+set local role anon;
+do $$
+declare t text; v_n bigint;
+begin
+  foreach t in array array['profiles','businesses','stores','business_memberships',
+                           'store_memberships','customer_memberships','invitations','audit_logs']
+  loop
+    begin
+      execute format('select count(*) from public.%I', t) into v_n;
+      raise exception 'ASSERT: anon could read %', t;
+    exception when insufficient_privilege then null;
+    end;
+  end loop;
+end $$;
+reset role;
+
+-- CASE: A2 tenant — owner sees only their own business
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_n int; v_volt int;
+begin
+  select count(*) into v_n from public.businesses;
+  if v_n <> 1 then raise exception 'ASSERT: owner should see exactly 1 business, saw %', v_n; end if;
+  select count(*) into v_volt from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_volt <> 0 then raise exception 'ASSERT: owner can see the foreign (Volt) business'; end if;
+end $$;
+reset role;
+
+-- CASE: A3 tenant — foreign identifiers resolve to nothing across tables
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: volt owner probed Ambika business'; end if;
+  select count(*) into v_n from public.stores where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: volt owner probed Ambika stores'; end if;
+  select count(*) into v_n from public.customer_memberships where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: volt owner probed Ambika customers'; end if;
+  select count(*) into v_n from public.business_memberships where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: volt owner probed Ambika memberships'; end if;
+  select count(*) into v_n from public.audit_logs where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: volt owner probed Ambika audit trail'; end if;
+end $$;
+reset role;
+
+-- CASE: A4 stores — manager sees all business stores; staff only assigned store
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.stores;
+  if v_n <> 2 then raise exception 'ASSERT: manager should see 2 Ambika stores, saw %', v_n; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+declare v_n int; v_sat int;
+begin
+  select count(*) into v_n from public.stores;
+  if v_n <> 1 then raise exception 'ASSERT: main-store staff should see exactly 1 store, saw %', v_n; end if;
+  select count(*) into v_sat from public.stores where id = 'bbbbbbbb-0000-4000-8000-000000000002';
+  if v_sat <> 0 then raise exception 'ASSERT: main-store staff can see the unassigned satellite store'; end if;
+end $$;
+reset role;
+
+-- CASE: A5 customer — no business-side rows visible
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.businesses;
+  if v_n <> 0 then raise exception 'ASSERT: customer can see businesses'; end if;
+  select count(*) into v_n from public.stores;
+  if v_n <> 0 then raise exception 'ASSERT: customer can see stores'; end if;
+  select count(*) into v_n from public.business_memberships;
+  if v_n <> 0 then raise exception 'ASSERT: customer can see business memberships'; end if;
+  select count(*) into v_n from public.audit_logs;
+  if v_n <> 0 then raise exception 'ASSERT: customer can see audit logs'; end if;
+  select count(*) into v_n from public.invitations;
+  if v_n <> 0 then raise exception 'ASSERT: customer can see invitations'; end if;
+end $$;
+reset role;
+
+-- CASE: A6 customer — sees only their own customer membership
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"66666666-6666-4666-8666-666666666666","role":"authenticated"}', true);
+do $$
+declare v_n int; v_rahul int;
+begin
+  select count(*) into v_n from public.customer_memberships;
+  if v_n <> 1 then raise exception 'ASSERT: Priya should see exactly 1 membership, saw %', v_n; end if;
+  select count(*) into v_rahul from public.customer_memberships
+   where profile_id = '55555555-5555-4555-8555-555555555555';
+  if v_rahul <> 0 then raise exception 'ASSERT: Priya can see Rahul''s membership'; end if;
+end $$;
+reset role;
+
+-- CASE: A7 staff — sees own business customer directory, never foreign tenant
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+declare v_n int; v_foreign int;
+begin
+  select count(*) into v_n from public.customer_memberships;
+  if v_n <> 3 then raise exception 'ASSERT: staff should see the 3 Ambika customer rows, saw %', v_n; end if;
+  select count(*) into v_foreign from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_foreign <> 0 then raise exception 'ASSERT: staff can see Volt customer rows'; end if;
+end $$;
+reset role;
+
+-- CASE: A8 memberships — staff sees only own; manager sees whole business
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.business_memberships;
+  if v_n <> 1 then raise exception 'ASSERT: staff should see only their own membership, saw %', v_n; end if;
+  select count(*) into v_n from public.store_memberships;
+  if v_n <> 1 then raise exception 'ASSERT: staff should see only their own store assignment, saw %', v_n; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.business_memberships;
+  if v_n <> 4 then raise exception 'ASSERT: manager should see all 4 Ambika memberships, saw %', v_n; end if;
+  select count(*) into v_n from public.store_memberships;
+  if v_n <> 2 then raise exception 'ASSERT: manager should see both store assignments, saw %', v_n; end if;
+end $$;
+reset role;
+
+-- CASE: A9 profiles — self, management peers, store peers boundaries
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.profiles;
+  if v_n <> 1 then raise exception 'ASSERT: customer should see only their own profile, saw %', v_n; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.profiles;
+  if v_n <> 4 then raise exception 'ASSERT: manager should see the 4 business-side profiles, saw %', v_n; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+declare v_n int; v_manager_visible int;
+begin
+  select count(*) into v_n from public.profiles;
+  if v_n <> 1 then raise exception 'ASSERT: lone main-store staff should see only own profile, saw %', v_n; end if;
+  select count(*) into v_manager_visible from public.profiles
+   where id = '22222222-2222-4222-8222-222222222222';
+  if v_manager_visible <> 0 then raise exception 'ASSERT: staff can see profile of non-coworker manager'; end if;
+end $$;
+reset role;
+
+-- CASE: A10 invitations — owner sees business invitations; staff/manager do not
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.invitations;
+  if v_n < 1 then raise exception 'ASSERT: owner should see the seeded pending invitation'; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.invitations;
+  if v_n <> 0 then raise exception 'ASSERT: manager can see invitations (owner-only)'; end if;
+end $$;
+reset role;
+
+-- CASE: A11 audit — readable by owner only
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.audit_logs;
+  if v_n < 1 then raise exception 'ASSERT: owner should see seeded audit rows'; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.audit_logs;
+  if v_n <> 0 then raise exception 'ASSERT: manager can read audit logs (owner-only)'; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.audit_logs;
+  if v_n <> 0 then raise exception 'ASSERT: staff can read audit logs (owner-only)'; end if;
+end $$;
+reset role;
+
+-- CASE: W1 profiles — own safe fields OK; email/status columns denied; peers untouched
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+do $$
+declare v_n int; v_name text;
+begin
+  update public.profiles set display_name = 'Rahul S.' where id = '55555555-5555-4555-8555-555555555555';
+  get diagnostics v_n = row_count;
+  if v_n <> 1 then raise exception 'ASSERT: own safe-field update should affect 1 row, affected %', v_n; end if;
+  select display_name into v_name from public.profiles where id = '55555555-5555-4555-8555-555555555555';
+  if v_name <> 'Rahul S.' then raise exception 'ASSERT: safe-field update did not persist'; end if;
+
+  begin
+    update public.profiles set email = 'hijack@evil.example' where id = '55555555-5555-4555-8555-555555555555';
+    raise exception 'ASSERT: email column update was permitted';
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    update public.profiles set status = 'suspended' where id = '55555555-5555-4555-8555-555555555555';
+    raise exception 'ASSERT: status column update was permitted';
+  exception when insufficient_privilege then null;
+  end;
+
+  update public.profiles set display_name = 'Hacked' where id = '66666666-6666-4666-8666-666666666666';
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then raise exception 'ASSERT: user updated another profile'; end if;
+end $$;
+reset role;
+do $$
+begin
+  update public.profiles set display_name = 'Rahul Sharma' where id = '55555555-5555-4555-8555-555555555555';
+end $$;
+
+-- CASE: W2 businesses — owner update OK; manager/staff/foreign-tenant denied
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  update public.businesses set support_phone = '+91 98250 41299' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  get diagnostics v_n = row_count;
+  if v_n <> 1 then raise exception 'ASSERT: owner should update own business, affected %', v_n; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  update public.businesses set name = 'Manager Takeover' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then raise exception 'ASSERT: manager updated business settings'; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  update public.businesses set name = 'Volt Takeover' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then raise exception 'ASSERT: foreign owner updated Ambika business'; end if;
+end $$;
+reset role;
+do $$
+begin
+  update public.businesses set support_phone = '+91 98250 41200' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+end $$;
+
+-- CASE: W3 businesses — direct INSERT denied for every signed-in role
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    insert into public.businesses (name) values ('Shadow Business');
+    raise exception 'ASSERT: direct business INSERT was permitted';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
+
+-- CASE: W4 stores — owner insert/update OK; staff+manager insert denied; staff update denied
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_n int; v_id uuid;
+begin
+  insert into public.stores (business_id, name, city)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', 'W4 Test Store', 'Surat')
+  returning id into v_id;
+  if v_id is null then raise exception 'ASSERT: owner store insert failed'; end if;
+  update public.stores set city = 'Surat City' where id = v_id;
+  get diagnostics v_n = row_count;
+  if v_n <> 1 then raise exception 'ASSERT: owner store update failed'; end if;
+  delete from public.stores where id = v_id;  -- owner has no DELETE grant → should fail
+  raise exception 'ASSERT: store DELETE should be denied (soft-close only)';
+exception when insufficient_privilege then
+  null; -- expected: DELETE denied — cleanup happens as postgres after reset role
+end $$;
+reset role;
+delete from public.stores where name = 'W4 Test Store';
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  begin
+    insert into public.stores (business_id, name) values ('aaaaaaaa-0000-4000-8000-000000000001', 'Rogue Store');
+    raise exception 'ASSERT: staff store INSERT was permitted';
+  exception when insufficient_privilege then null;
+  end;
+  update public.stores set name = 'Renamed By Staff' where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then raise exception 'ASSERT: staff updated a store'; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    insert into public.stores (business_id, name) values ('aaaaaaaa-0000-4000-8000-000000000001', 'Manager Store');
+    raise exception 'ASSERT: manager store INSERT was permitted (owner-only)';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
+
+-- CASE: W5 customer_memberships — staff enrolls own business only; customers denied
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+declare v_id uuid;
+begin
+  insert into public.customer_memberships (business_id, display_name, membership_no, enrolled_store_id)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', 'W5 Walk-in', null, 'bbbbbbbb-0000-4000-8000-000000000001')
+  returning id into v_id;
+  if v_id is null then raise exception 'ASSERT: staff enrollment failed'; end if;
+  begin
+    insert into public.customer_memberships (business_id, display_name, membership_no)
+    values ('aaaaaaaa-0000-4000-8000-000000000002', 'Cross Tenant', null);
+    raise exception 'ASSERT: staff enrolled a customer into a FOREIGN business';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    insert into public.customer_memberships (business_id, display_name, membership_no)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'Self Enroll', null);
+    raise exception 'ASSERT: customer self-enrollment INSERT was permitted';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
+delete from public.customer_memberships where display_name = 'W5 Walk-in';
+
+-- CASE: W6 customer_memberships — UPDATE limited to manager+
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  update public.customer_memberships set status = 'blocked'
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  get diagnostics v_n = row_count;
+  if v_n <> 0 then raise exception 'ASSERT: staff updated customer membership status'; end if;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  update public.customer_memberships set display_name = 'Rahul Sharma (verified)'
+   where profile_id = '55555555-5555-4555-8555-555555555555';
+  get diagnostics v_n = row_count;
+  if v_n <> 1 then raise exception 'ASSERT: manager should update business customer rows, affected %', v_n; end if;
+  update public.customer_memberships set display_name = 'Rahul Sharma'
+   where profile_id = '55555555-5555-4555-8555-555555555555';
+end $$;
+reset role;
+
+-- CASE: W7 memberships / invitations / audit — direct writes denied (RPC-only paths)
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    insert into public.business_memberships (business_id, profile_id, role)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', '55555555-5555-4555-8555-555555555555', 'staff');
+    raise exception 'ASSERT: direct business_membership INSERT permitted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update public.business_memberships set role = 'owner' where profile_id = '33333333-3333-4333-8333-333333333333';
+    raise exception 'ASSERT: direct business_membership UPDATE permitted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    delete from public.business_memberships where profile_id = '33333333-3333-4333-8333-333333333333';
+    raise exception 'ASSERT: direct business_membership DELETE permitted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.store_memberships (store_id, business_id, profile_id)
+    values ('bbbbbbbb-0000-4000-8000-000000000002', 'aaaaaaaa-0000-4000-8000-000000000001', '33333333-3333-4333-8333-333333333333');
+    raise exception 'ASSERT: direct store_membership INSERT permitted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.invitations (business_id, email, role, token_hash, expires_at, invited_by)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'direct@ambika.local', 'staff',
+            encode(extensions.digest('w7-direct', 'sha256'), 'hex'), now() + interval '1 day',
+            '88888888-8888-4888-8888-888888888888');
+    raise exception 'ASSERT: direct invitation INSERT permitted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update public.invitations set status = 'revoked';
+    raise exception 'ASSERT: direct invitation UPDATE permitted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.audit_logs (action) values ('forged.entry');
+    raise exception 'ASSERT: direct audit INSERT permitted';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+reset role;
+
+-- CASE: R1 rpc — unauthenticated callers are rejected
+set local role authenticated;
+select set_config('request.jwt.claims', '', true);
+do $$
+begin
+  begin
+    perform * from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'x@ambika.local', 'staff');
+    raise exception 'ASSERT: anonymous RPC call succeeded';
+  exception when insufficient_privilege or invalid_authorization_specification then null;
+  end;
+  begin
+    perform public.complete_business_signup('Ghost Business');
+    raise exception 'ASSERT: anonymous signup RPC succeeded';
+  exception when insufficient_privilege or invalid_authorization_specification then null;
+  end;
+end $$;
+reset role;
+
+-- CASE: R2 rpc — owner creates invitation: raw token returned once, hash stored, audited
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_id uuid; v_token text;
+begin
+  select invitation_id, token into v_id, v_token
+    from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r2-newmanager@ambika.local', 'manager', null, 48);
+  if v_token is null or length(v_token) <> 64 then
+    raise exception 'ASSERT: raw token not returned once (len %)', length(coalesce(v_token, ''));
+  end if;
+  execute 'reset role';
+  if not exists (
+    select 1 from public.invitations i
+    where i.id = v_id
+      and i.token_hash = encode(extensions.digest(v_token, 'sha256'), 'hex')
+      and i.token_hash <> v_token
+      and i.status = 'pending'
+  ) then
+    raise exception 'ASSERT: invitation row/hash not stored correctly';
+  end if;
+  if not exists (
+    select 1 from public.audit_logs
+    where action = 'invitation.created' and business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+      and target_id = v_id::text
+  ) then
+    raise exception 'ASSERT: invitation.created audit row missing';
+  end if;
+  -- invitation row cleanup (audit rows are immutable and intentionally remain)
+  delete from public.invitations where id = v_id;
+end $$;
+reset role;
+
+-- CASE: R3 rpc — manager/staff cannot invite; denials are audited
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    perform * from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r3-target@ambika.local', 'staff');
+    raise exception 'ASSERT: manager created an invitation';
+  exception when insufficient_privilege then
+    if sqlerrm not like '%not_authorized%' then raise; end if;
+  end;
+end $$;
+select set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    perform * from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r3-target@ambika.local', 'staff');
+    raise exception 'ASSERT: staff created an invitation';
+  exception when insufficient_privilege then
+    if sqlerrm not like '%not_authorized%' then raise; end if;
+  end;
+end $$;
+reset role;
+
+-- CASE: R4 rpc — invalid role and expiry rejected
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    perform * from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r4@ambika.local', 'owner');
+    raise exception 'ASSERT: owner-role invitation created via RPC';
+  exception when invalid_parameter_value then
+    if sqlerrm not like '%invalid_role%' then raise; end if;
+  end;
+  begin
+    perform * from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r4@ambika.local', 'staff', null, 0);
+    raise exception 'ASSERT: zero-hour expiry invitation created';
+  exception when invalid_parameter_value then
+    if sqlerrm not like '%invalid_expiry%' then raise; end if;
+  end;
+  begin
+    perform * from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000002', 'r4@ambika.local', 'staff');
+    raise exception 'ASSERT: owner invited into a FOREIGN business';
+  exception when insufficient_privilege then
+    if sqlerrm not like '%not_authorized%' then raise; end if;
+  end;
+end $$;
+reset role;
+
+-- CASE: R5 rpc — duplicate pending invitation rejected
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+begin
+  begin
+    perform * from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'DEV-NEWSTAFF@ambika.local', 'staff');
+    raise exception 'ASSERT: duplicate pending invitation accepted';
+  exception when unique_violation then
+    if sqlerrm not like '%invitation_already_pending%' then raise; end if;
+  end;
+end $$;
+reset role;
+
+-- CASE: R6 rpc — accept binds the invited profile to exactly the intended business/store/role
+do $$
+declare
+  v_invitee uuid := '70000000-1111-4000-8000-000000000006';
+  v_token text; v_result jsonb; v_role public.app_role; v_store int; v_status public.invitation_status;
+begin
+  -- fresh invitee account (postgres role)
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_invitee, 'authenticated', 'authenticated',
+          'r6-invitee@ambika.local', '!', now(), '{"full_name":"R6 Invitee"}'::jsonb);
+
+  -- owner creates a store-scoped staff invitation
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select token into v_token
+    from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r6-invitee@ambika.local', 'staff',
+                                  'bbbbbbbb-0000-4000-8000-000000000002', 72);
+  if v_token is null then raise exception 'ASSERT: no token returned'; end if;
+
+  -- invitee accepts
+  perform set_config('request.jwt.claims', jsonb_build_object('sub', v_invitee, 'role', 'authenticated')::text, true);
+  select public.accept_invitation(v_token) into v_result;
+  if v_result ->> 'role' <> 'staff' then raise exception 'ASSERT: accepted role mismatch: %', v_result; end if;
+  if (v_result ->> 'business_id') <> 'aaaaaaaa-0000-4000-8000-000000000001' then raise exception 'ASSERT: accepted business mismatch'; end if;
+
+  execute 'reset role';
+  select role into v_role from public.business_memberships where profile_id = v_invitee;
+  if v_role <> 'staff' then raise exception 'ASSERT: membership role not staff'; end if;
+  select count(*) into v_store from public.store_memberships
+   where profile_id = v_invitee and store_id = 'bbbbbbbb-0000-4000-8000-000000000002';
+  if v_store <> 1 then raise exception 'ASSERT: store assignment missing after accept'; end if;
+  select status into v_status from public.invitations where token_hash = encode(extensions.digest(v_token,'sha256'),'hex');
+  if v_status <> 'accepted' then raise exception 'ASSERT: invitation status not accepted'; end if;
+  if not exists (select 1 from public.audit_logs where action = 'invitation.accepted' and actor_profile_id = v_invitee) then
+    raise exception 'ASSERT: invitation.accepted audit missing';
+  end if;
+
+  -- cleanup
+  delete from public.store_memberships where profile_id = v_invitee;
+  delete from public.business_memberships where profile_id = v_invitee;
+  delete from public.invitations where token_hash = encode(extensions.digest(v_token,'sha256'),'hex');
+  delete from auth.users where id = v_invitee;
+end $$;
+
+-- CASE: R7 rpc — invitation tokens are single-use
+do $$
+declare
+  v_invitee uuid := '70000000-1111-4000-8000-000000000007';
+  v_token text;
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_invitee, 'authenticated', 'authenticated',
+          'r7-invitee@ambika.local', '!', now(), '{"full_name":"R7 Invitee"}'::jsonb);
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select token into v_token from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r7-invitee@ambika.local', 'staff');
+
+  perform set_config('request.jwt.claims', jsonb_build_object('sub', v_invitee, 'role', 'authenticated')::text, true);
+  perform public.accept_invitation(v_token);
+  begin
+    perform public.accept_invitation(v_token);
+    raise exception 'ASSERT: invitation token was accepted twice';
+  exception when invalid_parameter_value then
+    if sqlerrm not like '%invitation_already_used%' then raise; end if;
+  end;
+
+  execute 'reset role';
+  delete from public.store_memberships where profile_id = v_invitee;
+  delete from public.business_memberships where profile_id = v_invitee;
+  delete from public.invitations where token_hash = encode(extensions.digest(v_token,'sha256'),'hex');
+  delete from auth.users where id = v_invitee;
+end $$;
+
+-- CASE: R8 rpc — acceptance bound to the invited email address
+do $$
+declare
+  v_attacker uuid := '70000000-1111-4000-8000-000000000008';
+  v_token text;
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_attacker, 'authenticated', 'authenticated',
+          'r8-attacker@ambika.local', '!', now(), '{"full_name":"Wrong Person"}'::jsonb);
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select token into v_token from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r8-victim@ambika.local', 'manager');
+
+  perform set_config('request.jwt.claims', jsonb_build_object('sub', v_attacker, 'role', 'authenticated')::text, true);
+  begin
+    perform public.accept_invitation(v_token);
+    raise exception 'ASSERT: wrong account accepted someone else''s invitation';
+  exception when invalid_authorization_specification or insufficient_privilege then
+    if sqlerrm not like '%invitation_email_mismatch%' then raise; end if;
+  end;
+
+  execute 'reset role';
+  if exists (select 1 from public.business_memberships where profile_id = v_attacker) then
+    raise exception 'ASSERT: attacker received a membership';
+  end if;
+  delete from public.invitations where token_hash = encode(extensions.digest(v_token,'sha256'),'hex');
+  delete from auth.users where id = v_attacker;
+end $$;
+
+-- CASE: R9 rpc — expired invitations rejected and marked expired
+do $$
+declare
+  v_invitee uuid := '70000000-1111-4000-8000-000000000009';
+  v_token text;
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_invitee, 'authenticated', 'authenticated',
+          'r9-invitee@ambika.local', '!', now(), '{"full_name":"R9 Invitee"}'::jsonb);
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select token into v_token from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r9-invitee@ambika.local', 'staff');
+  execute 'reset role';
+
+  -- force expiry (privileged maintenance path)
+  update public.invitations set expires_at = now() - interval '1 minute'
+   where token_hash = encode(extensions.digest(v_token,'sha256'),'hex');
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', jsonb_build_object('sub', v_invitee, 'role', 'authenticated')::text, true);
+  begin
+    perform public.accept_invitation(v_token);
+    raise exception 'ASSERT: expired invitation was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm not like '%invitation_expired%' then raise; end if;
+  end;
+  execute 'reset role';
+
+  delete from public.invitations where token_hash = encode(extensions.digest(v_token,'sha256'),'hex');
+  delete from auth.users where id = v_invitee;
+end $$;
+
+-- CASE: R10 rpc — revoked invitations rejected; revoke is owner-only
+do $$
+declare
+  v_invitee uuid := '70000000-1111-4000-8000-000000000010';
+  v_token text; v_id uuid;
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_invitee, 'authenticated', 'authenticated',
+          'r10-invitee@ambika.local', '!', now(), '{"full_name":"R10 Invitee"}'::jsonb);
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select invitation_id, token into v_id, v_token
+    from public.create_invitation('aaaaaaaa-0000-4000-8000-000000000001', 'r10-invitee@ambika.local', 'staff');
+
+  -- manager tries to revoke → denied
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.revoke_invitation(v_id);
+    raise exception 'ASSERT: manager revoked an invitation';
+  exception when insufficient_privilege then
+    if sqlerrm not like '%not_authorized%' then raise; end if;
+  end;
+
+  -- owner revokes
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  perform public.revoke_invitation(v_id);
+
+  -- invitee tries to accept → denied
+  perform set_config('request.jwt.claims', jsonb_build_object('sub', v_invitee, 'role', 'authenticated')::text, true);
+  begin
+    perform public.accept_invitation(v_token);
+    raise exception 'ASSERT: revoked invitation was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm not like '%invitation_revoked%' then raise; end if;
+  end;
+  execute 'reset role';
+
+  if not exists (select 1 from public.invitations where id = v_id and status = 'revoked' and revoked_by = '88888888-8888-4888-8888-888888888888') then
+    raise exception 'ASSERT: revoked state not recorded';
+  end if;
+  if not exists (select 1 from public.audit_logs where action = 'invitation.revoked' and target_id = v_id::text) then
+    raise exception 'ASSERT: invitation.revoked audit missing';
+  end if;
+
+  delete from public.invitations where id = v_id;
+  delete from auth.users where id = v_invitee;
+end $$;
+
+-- CASE: R11 rpc — change_member_role: owner-only, audited, self/owner guards
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_role public.app_role;
+begin
+  -- owner promotes staff-main → manager
+  perform public.change_member_role('aaaaaaaa-0000-4000-8000-000000000001', '33333333-3333-4333-8333-333333333333', 'manager');
+  select role into v_role from public.business_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and profile_id = '33333333-3333-4333-8333-333333333333';
+  if v_role <> 'manager' then raise exception 'ASSERT: role change did not persist'; end if;
+  if not exists (select 1 from public.audit_logs where action = 'membership.role_changed'
+                  and target_id = '33333333-3333-4333-8333-333333333333'
+                  and metadata ->> 'new_role' = 'manager') then
+    raise exception 'ASSERT: membership.role_changed audit missing';
+  end if;
+  -- owner cannot demote themselves
+  begin
+    perform public.change_member_role('aaaaaaaa-0000-4000-8000-000000000001', '88888888-8888-4888-8888-888888888888', 'staff');
+    raise exception 'ASSERT: owner demoted themselves';
+  exception when invalid_parameter_value then
+    if sqlerrm not like '%cannot_change_own_role%' then raise; end if;
+  end;
+  -- now-manager cannot change roles (owner-only control)
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.change_member_role('aaaaaaaa-0000-4000-8000-000000000001', '44444444-4444-4444-8444-444444444444', 'manager');
+    raise exception 'ASSERT: promoted ex-staff changed another member role';
+  exception when insufficient_privilege then
+    if sqlerrm not like '%not_authorized%' then raise; end if;
+  end;
+  -- restore
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  perform public.change_member_role('aaaaaaaa-0000-4000-8000-000000000001', '33333333-3333-4333-8333-333333333333', 'staff');
+end $$;
+reset role;
+
+-- CASE: R12 rpc — remove_member: owner-only, cascades store assignments, audited
+do $$
+declare
+  v_staff uuid := '70000000-1111-4000-8000-000000000012';
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_staff, 'authenticated', 'authenticated',
+          'r12-staff@ambika.local', '!', now(), '{"full_name":"R12 Staff"}'::jsonb);
+  insert into public.business_memberships (business_id, profile_id, role)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', v_staff, 'staff');
+  insert into public.store_memberships (store_id, business_id, profile_id)
+  values ('bbbbbbbb-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000001', v_staff);
+
+  execute 'set local role authenticated';
+  -- manager cannot remove
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.remove_member('aaaaaaaa-0000-4000-8000-000000000001', v_staff);
+    raise exception 'ASSERT: manager removed a member';
+  exception when insufficient_privilege then
+    if sqlerrm not like '%not_authorized%' then raise; end if;
+  end;
+  -- owner cannot remove self
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    perform public.remove_member('aaaaaaaa-0000-4000-8000-000000000001', '88888888-8888-4888-8888-888888888888');
+    raise exception 'ASSERT: owner removed themselves';
+  exception when invalid_parameter_value then
+    if sqlerrm not like '%cannot_remove_self%' then raise; end if;
+  end;
+  -- owner removes staff
+  perform public.remove_member('aaaaaaaa-0000-4000-8000-000000000001', v_staff);
+  execute 'reset role';
+
+  if exists (select 1 from public.business_memberships where profile_id = v_staff) then
+    raise exception 'ASSERT: membership survived remove_member';
+  end if;
+  if exists (select 1 from public.store_memberships where profile_id = v_staff) then
+    raise exception 'ASSERT: store assignment survived remove_member';
+  end if;
+  if not exists (select 1 from public.audit_logs where action = 'membership.removed' and target_id = v_staff::text) then
+    raise exception 'ASSERT: membership.removed audit missing';
+  end if;
+  delete from auth.users where id = v_staff;
+end $$;
+
+-- CASE: R13 rpc — store assignment owner-only and audited
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+do $$
+declare v_n int;
+begin
+  perform public.assign_member_to_store('bbbbbbbb-0000-4000-8000-000000000002', '33333333-3333-4333-8333-333333333333');
+  select count(*) into v_n from public.store_memberships
+   where store_id = 'bbbbbbbb-0000-4000-8000-000000000002' and profile_id = '33333333-3333-4333-8333-333333333333';
+  if v_n <> 1 then raise exception 'ASSERT: assignment missing'; end if;
+  if not exists (select 1 from public.audit_logs where action = 'store_assignment.created') then
+    raise exception 'ASSERT: store_assignment.created audit missing';
+  end if;
+  -- manager may not manage store assignments (owner-only control)
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.unassign_member_from_store('bbbbbbbb-0000-4000-8000-000000000002', '33333333-3333-4333-8333-333333333333');
+    raise exception 'ASSERT: manager unassigned a store member';
+  exception when insufficient_privilege then
+    if sqlerrm not like '%not_authorized%' then raise; end if;
+  end;
+  -- owner unassigns (restore seed state)
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  perform public.unassign_member_from_store('bbbbbbbb-0000-4000-8000-000000000002', '33333333-3333-4333-8333-333333333333');
+end $$;
+reset role;
+
+-- CASE: R14 rpc — complete_business_signup creates a tenant once and is idempotent
+do $$
+declare
+  v_customer uuid := '70000000-1111-4000-8000-000000000014';
+  v_first jsonb; v_second jsonb; v_biz_before int; v_biz_after int; v_owner_result jsonb;
+begin
+  insert into auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+  values ('00000000-0000-0000-0000-000000000000', v_customer, 'authenticated', 'authenticated',
+          'r14-founder@ambika.local', '!', now(), '{"full_name":"R14 Founder","signup_context":"business"}'::jsonb);
+
+  select count(*) into v_biz_before from public.businesses;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', jsonb_build_object('sub', v_customer, 'role', 'authenticated')::text, true);
+  select public.complete_business_signup('R14 Test Electricals', 'R14 Main Store', null, null, '+91 90000 00000') into v_first;
+  if (v_first ->> 'already_member')::boolean then raise exception 'ASSERT: first signup reported already_member'; end if;
+  if (v_first ->> 'role') <> 'owner' then raise exception 'ASSERT: founder did not receive owner role'; end if;
+  select public.complete_business_signup('R14 Test Electricals') into v_second;
+  if not (v_second ->> 'already_member')::boolean then raise exception 'ASSERT: second signup was not idempotent'; end if;
+  if (v_second ->> 'business_id') <> (v_first ->> 'business_id') then raise exception 'ASSERT: idempotency returned a different business'; end if;
+
+  -- existing Ambika owner also gets already_member (no second tenant)
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select public.complete_business_signup('Ambika Electricals') into v_owner_result;
+  if not (v_owner_result ->> 'already_member')::boolean
+     or (v_owner_result ->> 'business_id') <> 'aaaaaaaa-0000-4000-8000-000000000001' then
+    raise exception 'ASSERT: existing owner signup did not map to their business';
+  end if;
+  execute 'reset role';
+
+  select count(*) into v_biz_after from public.businesses;
+  if v_biz_after <> v_biz_before + 1 then raise exception 'ASSERT: expected exactly one new business (% → %)', v_biz_before, v_biz_after; end if;
+  if not exists (select 1 from public.audit_logs where action = 'business.created' and business_id = (v_first ->> 'business_id')::uuid) then
+    raise exception 'ASSERT: business.created audit missing';
+  end if;
+
+  -- cleanup the temporary tenant
+  delete from public.business_memberships where business_id = (v_first ->> 'business_id')::uuid;
+  delete from public.stores where business_id = (v_first ->> 'business_id')::uuid;
+  delete from public.businesses where id = (v_first ->> 'business_id')::uuid;
+  delete from auth.users where id = v_customer;
+end $$;
+
+-- CASE: V1 service_role — bypasses RLS for trusted server operations
+set local role service_role;
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.businesses;
+  if v_n < 2 then raise exception 'ASSERT: service_role should see all businesses, saw %', v_n; end if;
+  select count(*) into v_n from public.profiles;
+  if v_n < 6 then raise exception 'ASSERT: service_role should see all profiles, saw %', v_n; end if;
+  select count(*) into v_n from public.audit_logs;
+  if v_n < 1 then raise exception 'ASSERT: service_role should see audit trail'; end if;
+end $$;
+reset role;
+
