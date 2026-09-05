@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import { motion } from "framer-motion";
 import { Download, IndianRupee, Repeat, Sparkles, Users } from "lucide-react";
@@ -220,7 +221,7 @@ export default function AnalyticsPage() {
   );
 }
 
-function Insight({ icon: Icon, label, value, note }: { icon: React.ElementType; label: string; value: string; note: string }) {
+function Insight({ icon: Icon, label, value, note }: { icon: LucideIcon; label: string; value: string; note: string }) {
   return (
     <div className="rounded-lg border bg-muted/30 p-4">
       <Icon className="size-4 text-muted-foreground" aria-hidden />

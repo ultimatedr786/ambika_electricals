@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
@@ -206,7 +207,7 @@ export default function CustomerDashboard() {
   );
 }
 
-function QuickAction({ href, icon: Icon, label }: { href: string; icon: React.ElementType; label: string }) {
+function QuickAction({ href, icon: Icon, label }: { href: string; icon: LucideIcon; label: string }) {
   return (
     <Link
       href={href}

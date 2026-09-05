@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -321,7 +322,7 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Insight({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: string }) {
+function Insight({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
   return (
     <div className="rounded-lg border bg-muted/30 p-3">
       <Icon className="size-4 text-muted-foreground" aria-hidden />

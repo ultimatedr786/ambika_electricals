@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Bell, CheckCheck, Gift, Sparkles, Trash2, TrendingUp, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,7 +11,7 @@ import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { cn, relativeTime } from "@/lib/utils";
 
-const icons: Record<string, React.ElementType> = {
+const icons: Record<string, LucideIcon> = {
   points: Zap,
   reward: Gift,
   tier: TrendingUp,

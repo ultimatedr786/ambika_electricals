@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -26,7 +27,7 @@ import type { RewardRule } from "@/types";
 
 type RuleType = RewardRule["type"];
 
-const triggers: { type: RuleType; label: string; hint: string; icon: React.ElementType }[] = [
+const triggers: { type: RuleType; label: string; hint: string; icon: LucideIcon }[] = [
   { type: "spend", label: "Customer spends", hint: "Earn points per ₹ spent", icon: TrendingUp },
   { type: "product", label: "Buys a product", hint: "Bonus on specific items", icon: Package },
   { type: "category", label: "Buys from category", hint: "Multiplier per category", icon: Layers },
