@@ -71,7 +71,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(87);
+select plan(107);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -566,11 +566,13 @@ select set_config('app.sale_mem', id::text, true)
   from public.customer_memberships
  where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
 
-select lives_ok(
-  format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
-    ''[{"name":"Wiring kit","qty":1,"unit_price_paise":100000},{"name":"LED bulb 9W","qty":5,"unit_price_paise":5000}]''::jsonb,
-    ''[{"method":"upi","amount_paise":125000}]''::jsonb, %L::uuid, 0, ''pgtap-sa1'')',
-    current_setting('app.sale_mem', true)),
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"Wiring kit","qty":1,"unit_price_paise":100000},{"name":"LED bulb 9W","qty":5,"unit_price_paise":5000}]''::jsonb,
+      ''[{"method":"upi","amount_paise":125000}]''::jsonb, %L::uuid, 0, ''pgtap-sa1'')',
+      current_setting('app.sale_mem', true))),
+  'NO_ERROR',
   'SA1: staff records a member sale'
 );
 select is(
@@ -596,10 +598,12 @@ select ok(
   'SA1: sale creation is audited'
 );
 
-select lives_ok(
-  'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
-    ''[{"name":"MCB 32A","qty":2,"unit_price_paise":45000}]''::jsonb,
-    ''[{"method":"cash","amount_paise":90000}]''::jsonb, null, 0, ''pgtap-sa2'')',
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"MCB 32A","qty":2,"unit_price_paise":45000}]''::jsonb,
+      ''[{"method":"cash","amount_paise":90000}]''::jsonb, null, 0, ''pgtap-sa2'')'),
+  'NO_ERROR',
   'SA2: walk-in sale succeeds'
 );
 select is(
@@ -642,11 +646,13 @@ select is(
   'SA5: payments must equal the server-computed total'
 );
 
-select lives_ok(
-  format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
-    ''[{"name":"Cable","qty":1,"unit_price_paise":50000}]''::jsonb,
-    ''[{"method":"cash","amount_paise":50000}]''::jsonb, %L::uuid, 0, ''pgtap-sa7'')',
-    current_setting('app.sale_mem', true)),
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"Cable","qty":1,"unit_price_paise":50000}]''::jsonb,
+      ''[{"method":"cash","amount_paise":50000}]''::jsonb, %L::uuid, 0, ''pgtap-sa7'')',
+      current_setting('app.sale_mem', true))),
+  'NO_ERROR',
   'SA7: fixture sale for voiding'
 );
 select is(
@@ -697,6 +703,166 @@ select is(
      values (''aaaaaaaa-0000-4000-8000-000000000001'', ''bbbbbbbb-0000-4000-8000-000000000001'', ''INV-999999'', 100, 100)'),
   '42501',
   'SA9: even owners cannot insert sales directly (RPC-only)'
+);
+
+-- ---------------------------------------------------------------------------
+-- INV series — catalogue + per-store stock + append-only inventory movements
+-- (Slice 3). Fixture product ₹100.00 (10000 paise), opening stock 10 at the
+-- Main Store; walked 10 → 8 (sale) → 13 (receipt, replayed once) → 10 (adjust).
+-- ---------------------------------------------------------------------------
+select lives_ok(
+  format('select extensions.perform_as(''authenticated'', ''22222222-2222-4222-8222-222222222222'', %L)',
+    'select public.create_product(''aaaaaaaa-0000-4000-8000-000000000001'',
+      ''pgTAP Inventory Fixture'', ''pgtap-inv-1'', 10000, null, null, null, ''piece'', null,
+      ''[{"store_id":"bbbbbbbb-0000-4000-8000-000000000001","qty":10}]''::jsonb)'),
+  'INV1: manager creates a catalogue product with opening stock'
+);
+select set_config('app.inv_prod', id::text, true)
+  from public.products where sku = 'PGTAP-INV-1';
+
+select is(
+  (select on_hand from public.inventory_by_store
+    where product_id = current_setting('app.inv_prod', true)::uuid
+      and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'),
+  10,
+  'INV1: opening stock lands in inventory_by_store'
+);
+select ok(
+  exists (select 1 from public.inventory_movements
+           where product_id = current_setting('app.inv_prod', true)::uuid
+             and reason = 'initial' and delta = 10 and balance_after = 10),
+  'INV1: opening stock is backed by an initial movement'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_product(''aaaaaaaa-0000-4000-8000-000000000001'',
+      ''Staff attempt'', ''pgtap-inv-staff'', 100)'),
+  '42501',
+  'INV1: staff cannot create products'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.create_product(''aaaaaaaa-0000-4000-8000-000000000001'',
+      ''Dup attempt'', ''PGTAP-INV-1'', 100)'),
+  '22023',
+  'INV1: duplicate sku is refused'
+);
+
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"product_id":"%s","qty":1,"unit_price_paise":9000}]''::jsonb,
+      ''[{"method":"cash","amount_paise":9000}]''::jsonb, null, 0, ''pgtap-inv-price'')',
+      current_setting('app.inv_prod', true))),
+  '22023',
+  'INV2: staff cannot override the catalogue price'
+);
+select lives_ok(
+  format('select extensions.perform_as(''authenticated'', ''33333333-3333-4333-8333-333333333333'', %L)',
+    format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"product_id":"%s","qty":2}]''::jsonb,
+      ''[{"method":"cash","amount_paise":20000}]''::jsonb, null, 0, ''pgtap-inv-sale'')',
+      current_setting('app.inv_prod', true))),
+  'INV2: staff sells two units at the catalogue price'
+);
+select is(
+  (select on_hand from public.inventory_by_store
+    where product_id = current_setting('app.inv_prod', true)::uuid
+      and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'),
+  8,
+  'INV2: the sale decremented stock'
+);
+select is(
+  (select si.unit_price_paise from public.sale_items si
+     join public.sales s on s.id = si.sale_id
+    where s.idempotency_key = 'pgtap-inv-sale'),
+  10000::bigint,
+  'INV2: the line was re-priced from the catalogue server-side'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"product_id":"%s","qty":999}]''::jsonb,
+      ''[{"method":"cash","amount_paise":9990000}]''::jsonb, null, 0, ''pgtap-inv-stock'')',
+      current_setting('app.inv_prod', true))),
+  '22023',
+  'INV3: overselling stock is refused'
+);
+
+select lives_ok(
+  format('select extensions.perform_as(''authenticated'', ''22222222-2222-4222-8222-222222222222'', %L)',
+    format('select public.receive_stock(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''%s'', 5, ''Supplier delivery'', ''pgtap-inv-receive'')',
+      current_setting('app.inv_prod', true))),
+  'INV4: manager receives stock'
+);
+select lives_ok(
+  format('select extensions.perform_as(''authenticated'', ''22222222-2222-4222-8222-222222222222'', %L)',
+    format('select public.receive_stock(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''%s'', 5, ''Supplier delivery'', ''pgtap-inv-receive'')',
+      current_setting('app.inv_prod', true))),
+  'INV4: the same receipt replays without double-posting'
+);
+select is(
+  (select count(*) from public.inventory_movements
+    where idempotency_key = 'pgtap-inv-receive'),
+  1::bigint,
+  'INV4: one receipt movement despite two calls'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.receive_stock(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''%s'', 5, null, ''pgtap-inv-staff-receive'')',
+      current_setting('app.inv_prod', true))),
+  '42501',
+  'INV4: staff cannot receive stock'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.adjust_stock(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''%s'', -1, ''   '', ''pgtap-inv-noreason'')',
+      current_setting('app.inv_prod', true))),
+  '22023',
+  'INV4: adjustments require a reason'
+);
+select lives_ok(
+  format('select extensions.perform_as(''authenticated'', ''22222222-2222-4222-8222-222222222222'', %L)',
+    format('select public.adjust_stock(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''%s'', -3, ''Damaged in transit'', ''pgtap-inv-adjust'')',
+      current_setting('app.inv_prod', true))),
+  'INV4: manager adjusts stock down with a reason'
+);
+select is(
+  (select on_hand from public.inventory_by_store
+    where product_id = current_setting('app.inv_prod', true)::uuid
+      and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'),
+  10,
+  'INV4: receipt (+5) and adjustment (−3) reconcile to 10'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    format('insert into public.inventory_movements
+      (business_id, store_id, product_id, delta, balance_after, reason)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''bbbbbbbb-0000-4000-8000-000000000001'',
+             ''%s'', 1, 999, ''receipt'')',
+      current_setting('app.inv_prod', true))),
+  '42501',
+  'INV6: even owners cannot insert movements directly (RPC-only)'
+);
+
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.products
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001''')::int,
+  0,
+  'INV7: customers never see the catalogue (until the rewards slice)'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.products
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001''')::int,
+  0,
+  'INV7: other tenants never see the catalogue'
 );
 
 select * from finish();

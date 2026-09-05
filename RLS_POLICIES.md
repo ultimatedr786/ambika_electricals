@@ -49,6 +49,9 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `sales` SELECT | **own sales only** (via own memberships) | whole business | whole business | whole business | writes RPC-only (`create_sale`/`void_sale`); voiding flips `status` — rows are never deleted |
 | `sale_items` / `sale_payments` SELECT | follows parent sale (`EXISTS` into RLS-filtered `sales`) | ← same | ← same | ← same | no DML grants; snapshot columns (`name/sku/price`) until the products slice adds server re-pricing |
 | `invoice_counters` | ✗ | ✗ | ✗ | ✗ | internal per-business sequence, locked inside `create_sale`; no grants, no policies |
+| `products` SELECT | ✗ (until the rewards slice adds a customer catalogue view) | whole business | whole business | whole business | writes RPC-only (`create_product`/`update_product`); archived, never deleted |
+| `inventory_by_store` SELECT | ✗ | **own stores when store-scoped**, else whole business | whole business | whole business | proposal §Store-scoped: the policy inherits the `stores` RLS scoping; writes RPC-only |
+| `inventory_movements` SELECT | ✗ | whole business | whole business | whole business | append-only operational history — no grants + trigger, corrections are compensating movements |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -81,6 +84,13 @@ in `src/lib/supabase/admin.ts`).
 | `point_balance` | anyone who may SELECT the cache | SECURITY INVOKER — RLS decides; 0 when nothing earned yet | — |
 | `create_sale` | staff+ of the store's business | store-scoped staff confined to their stores; member must be active & in-business; items/payments validated and **totals computed server-side**; payments must equal total exactly; per-business sequential invoices under a locked counter; idempotency-key replay returns the stored sale; member sales post a `sale`-sourced ledger earn (launch policy ₹100→10 pts, floor on paise) | `sale.created` (+ `points.awarded` via ledger) |
 | `void_sale` | manager+ | reason required; only `completed` sales; never deletes — flips status and **reverses points with a compensating `adjust` entry** (idempotent on `sale-void:<id>`) | `sale.voided` (+ `points.adjusted`) |
+| `create_product` | manager+ | sku normalized (upper/trim) + unique per business; optional opening stock `[{store_id, qty}]` posted as `initial` movements (store must be in-business) | `product.created` |
+| `update_product` | manager+ | partial update; price ≥ 0; status `active`/`archived` only (never deleted); price changes land in the audit | `product.updated` (price before/after) |
+| `receive_stock` | manager+ | qty > 0; product must be active & in-business; replay-safe on the idempotency key (a replay never re-audits) | `stock.received` |
+| `adjust_stock` | manager+ | signed non-zero delta; **reason mandatory** (stored as the movement note); never drives available stock negative | `stock.adjusted` |
+| `create_sale` v2 | staff+ | Slice-2 semantics **plus**: catalogue lines are re-priced from `products.price_paise` (a differing client price is refused unless manager+ — line flagged `price_overridden`, audited); catalogue lines need whole units; stock is validated and decremented through `inventory_move` under the deterministic lock order *balance → inventory (by product_id) → invoice counter* | `sale.created` (+ `stock_lines`/`price_overrides` in metadata) |
+| `void_sale` v2 | manager+ | Slice-2 semantics **plus**: catalogue lines are restocked with compensating `sale_void` movements (idempotent per sale+product) | `sale.voided` (+ `stock_lines_restored`) |
+| `inventory_move` | — internal — | EXECUTE revoked from API roles (like `ledger_post_entry`); locks the stock row, enforces `on_hand ≥ reserved`, appends the movement with `balance_after`, replay-safe on the per-business key | — |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
@@ -93,9 +103,9 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **61 cases, 61 passed** (Step 2 suite executed 2026-09-05;
-ledger + sales suites 2026-09-06, against PostgreSQL 18.4 with the real migrations + seed; see
-`RLS_TEST_RESULTS.md` for all logs):
+`scripts/rls-check/10_assertions.sql` — **69 cases, 69 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales + inventory suites 2026-09-06, against PostgreSQL 18.4 with the real migrations +
+seed; see `RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
   cross-tenant FK-consistency trigger, uniqueness constraints, one-pending-invite rule, invitation
@@ -112,6 +122,16 @@ ledger + sales suites 2026-09-06, against PostgreSQL 18.4 with the real migratio
   member removal / store assignment with audit rows; `complete_business_signup` creates a tenant
   once and is idempotent.
 - **V1** service_role bypass for trusted server operations.
+- **INV1–INV8** inventory: manager-only product creation with opening stock posted as `initial`
+  movements (staff/customers/other tenants 42501, duplicate sku refused); catalogue lines are
+  re-priced server-side (client name/price ignored — staff overrides refused 22023, manager
+  overrides flagged + audited) and decrement stock; oversell and fractional catalogue quantities
+  refused with nothing persisted; receive/adjust are manager+, reason-guarded, replay-safe
+  (one movement per key) and cross-tenant-safe; archived products reject receipts; voiding a sale
+  restocks via `sale_void` movements; `inventory_movements` immutable (trigger refuses postgres,
+  grants refuse API roles); store-scoped staff see only their stores' stock while managers see the
+  business; customers/other tenants see no catalogue at all; no DML grants — even owners can't
+  write products or stock directly.
 - **SA1–SA9** sales: member sale keeps totals/points/invoice/payment/ledger/cache/audit in sync
   (₹1,250 → 125 pts); walk-ins earn nothing; customers, other tenants and store-scoped staff
   refused (42501) while scoped staff may sell at their own store; payment mismatch / bad method /
@@ -128,7 +148,7 @@ ledger + sales suites 2026-09-06, against PostgreSQL 18.4 with the real migratio
   for postgres); RLS visibility own-memberships / whole-business / never cross-tenant; insert
   guards reject business-mismatched, foreign-store and blocked-membership entries.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 87 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 107 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. It could not be executed in the build sandbox (no Docker);
 the plain-SQL harness proves identical boundaries on stock PostgreSQL.
 
@@ -152,5 +172,11 @@ the plain-SQL harness proves identical boundaries on stock PostgreSQL.
   of published `loyalty_rule_sets`; idempotency lives on the sale row (unique business+key)
   instead of a generic `idempotency_keys` table — same replay guarantee, less machinery.
   `sale_items.points_awarded` stays 0 until per-line rule pricing exists.
+- Inventory slice deviations: `product_categories`/`product_images`/`brand` deferred (free-text
+  category/subcategory + `art_key` cover the launch UI); `reserved` stays 0 until redemptions add
+  holds; movements carry `balance_after` + per-business idempotency keys (points_ledger pattern)
+  and FK-free `created_by`; the customer-facing catalogue view arrives with the rewards slice;
+  catalogue-backed sale lines need whole units (integer movement deltas) — fractional units
+  (wire per metre) stay snapshot-only until a units slice.
 - `actor_profile_id` on the ledger is FK-free on purpose (audit_logs precedent): deleting a staff
   auth user must never be blocked by — or silently rewrite — financial history.

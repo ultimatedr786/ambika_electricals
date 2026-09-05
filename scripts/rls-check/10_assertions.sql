@@ -1808,3 +1808,438 @@ begin
   end;
   execute 'reset role';
 end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- INV cases — catalogue + per-store stock + append-only inventory movements
+-- (Slice 3). Cases COMMIT; each creates its own fixtures (products) and
+-- unique idempotency keys. Seeded catalogue product cccc…01 (Philips 9W LED
+-- Bulb, ₹120.00 = 12000 paise, Main Store opening stock 120) is walked
+-- deterministically: 120 → 118 → 117 (INV2) → 142 → 137 (INV4) → 134 → 137
+-- (INV5). Stock rows are never deleted; corrections are appended movements.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- CASE: INV1 products — manager creates with opening stock; staff/customers/other tenants refused; duplicate sku refused
+do $$
+declare
+  v_res jsonb; v_pid uuid; v_n int;
+begin
+  execute 'set local role authenticated';
+
+  -- staff cannot create products
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.create_product('aaaaaaaa-0000-4000-8000-000000000001', 'Staff attempt', 'INV1-STAFF', 100);
+    raise exception 'ASSERT: INV1 staff created a product';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- customer cannot create products
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.create_product('aaaaaaaa-0000-4000-8000-000000000001', 'Customer attempt', 'INV1-CUST', 100);
+    raise exception 'ASSERT: INV1 customer created a product';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Volt owner cannot create in Ambika's catalogue
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.create_product('aaaaaaaa-0000-4000-8000-000000000001', 'Volt attempt', 'INV1-VOLT', 100);
+    raise exception 'ASSERT: INV1 cross-tenant product created';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- manager creates with opening stock at the Main Store
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.create_product(
+    'aaaaaaaa-0000-4000-8000-000000000001', 'INV1 Test Product', 'inv1-test-sku', 50000,
+    'Testing', null, 60000, 'piece', null,
+    '[{"store_id":"bbbbbbbb-0000-4000-8000-000000000001","qty":10}]'::jsonb
+  ) into v_res;
+  execute 'reset role';
+
+  v_pid := (v_res ->> 'product_id')::uuid;
+  if (v_res ->> 'sku') <> 'INV1-TEST-SKU' then raise exception 'ASSERT: INV1 sku not normalized: %', v_res; end if;
+
+  select count(*) into v_n from public.products
+   where id = v_pid and status = 'active' and price_paise = 50000 and category = 'Testing';
+  if v_n <> 1 then raise exception 'ASSERT: INV1 product row wrong'; end if;
+  select on_hand into v_n from public.inventory_by_store
+   where product_id = v_pid and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_n <> 10 then raise exception 'ASSERT: INV1 opening stock wrong: %', v_n; end if;
+  select count(*) into v_n from public.inventory_movements
+   where product_id = v_pid and reason = 'initial' and delta = 10 and balance_after = 10;
+  if v_n <> 1 then raise exception 'ASSERT: INV1 initial movement missing'; end if;
+  select count(*) into v_n from public.audit_logs where action = 'product.created' and target_id = v_pid::text;
+  if v_n <> 1 then raise exception 'ASSERT: INV1 product.created audit missing'; end if;
+
+  -- duplicate sku refused
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.create_product('aaaaaaaa-0000-4000-8000-000000000001', 'Dup', 'INV1-TEST-SKU', 100);
+    raise exception 'ASSERT: INV1 duplicate sku accepted';
+  exception when invalid_parameter_value then
+    if position('sku_exists' in SQLERRM) = 0 then raise exception 'ASSERT: INV1 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: INV2 sales re-price from the catalogue; staff overrides refused, manager overrides flagged; stock decrements
+do $$
+declare
+  v_res jsonb; v_sale uuid; v_n int; v_price bigint; v_over boolean; v_name text;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  -- staff sending a wrong price for a catalogue line is refused
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"product_id":"cccccccc-0000-4000-8000-000000000001","name":"Hacked","qty":1,"unit_price_paise":10000}]'::jsonb,
+      '[{"method":"cash","amount_paise":10000}]'::jsonb, null, 0, 'inv2-bad-price');
+    raise exception 'ASSERT: INV2 staff price override accepted';
+  exception when invalid_parameter_value then
+    if position('price_override_forbidden' in SQLERRM) = 0 then raise exception 'ASSERT: INV2 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+  select count(*) into v_n from public.sales where idempotency_key = 'inv2-bad-price';
+  if v_n <> 0 then raise exception 'ASSERT: INV2 refused sale persisted'; end if;
+
+  -- staff selling at the catalogue price succeeds; catalogue name/price win
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"product_id":"cccccccc-0000-4000-8000-000000000001","name":"Hacked","qty":2,"unit_price_paise":12000}]'::jsonb,
+    '[{"method":"upi","amount_paise":24000}]'::jsonb, null, 0, 'inv2-ok') into v_res;
+
+  -- manager may override the price (flagged + audited)
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"product_id":"cccccccc-0000-4000-8000-000000000001","qty":1,"unit_price_paise":11000}]'::jsonb,
+    '[{"method":"cash","amount_paise":11000}]'::jsonb, null, 0, 'inv2-override') into v_res;
+  if (v_res ->> 'price_overrides')::int <> 1 then raise exception 'ASSERT: INV2 override not counted: %', v_res; end if;
+  v_sale := (v_res ->> 'sale_id')::uuid;
+  execute 'reset role';
+
+  select si.unit_price_paise, si.price_overridden, si.name_snapshot into v_price, v_over, v_name
+    from public.sale_items si
+    join public.sales s on s.id = si.sale_id
+   where s.idempotency_key = 'inv2-override';
+  if v_price <> 11000 or not v_over then raise exception 'ASSERT: INV2 override line wrong: % / %', v_price, v_over; end if;
+
+  select si.unit_price_paise, si.price_overridden, si.name_snapshot, si.product_id into v_price, v_over, v_name, v_sale
+    from public.sale_items si
+    join public.sales s on s.id = si.sale_id
+   where s.idempotency_key = 'inv2-ok';
+  if v_price <> 12000 then raise exception 'ASSERT: INV2 catalogue price not used: %', v_price; end if;
+  if v_over then raise exception 'ASSERT: INV2 clean line flagged as override'; end if;
+  if v_name <> 'Philips 9W LED Bulb' then raise exception 'ASSERT: INV2 client name not replaced by catalogue: %', v_name; end if;
+  if v_sale <> 'cccccccc-0000-4000-8000-000000000001' then raise exception 'ASSERT: INV2 product link missing'; end if;
+
+  -- stock: 120 seeded → 118 (qty 2) → 117 (override qty 1)
+  select on_hand into v_n from public.inventory_by_store
+   where product_id = 'cccccccc-0000-4000-8000-000000000001' and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_n <> 117 then raise exception 'ASSERT: INV2 stock wrong: expected 117, got %', v_n; end if;
+  select count(*) into v_n from public.inventory_movements
+   where product_id = 'cccccccc-0000-4000-8000-000000000001' and reason = 'sale'
+     and store_id = 'bbbbbbbb-0000-4000-8000-000000000001' and delta in (-2, -1);
+  if v_n <> 2 then raise exception 'ASSERT: INV2 sale movements wrong: %', v_n; end if;
+  select count(*) into v_n from public.inventory_movements m
+   where m.reason = 'sale' and m.balance_after = 118 and m.delta = -2
+     and m.product_id = 'cccccccc-0000-4000-8000-000000000001';
+  if v_n <> 1 then raise exception 'ASSERT: INV2 movement balance_after wrong'; end if;
+end $$;
+
+-- CASE: INV3 sales — insufficient stock and fractional catalogue quantities are refused with nothing persisted
+do $$
+declare
+  v_n int;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"product_id":"cccccccc-0000-4000-8000-000000000001","qty":5000,"unit_price_paise":12000}]'::jsonb,
+      '[{"method":"cash","amount_paise":60000000}]'::jsonb, null, 0, 'inv3-stock');
+    raise exception 'ASSERT: INV3 oversell accepted';
+  exception when invalid_parameter_value then
+    if position('insufficient_stock' in SQLERRM) = 0 then raise exception 'ASSERT: INV3 wrong message %', SQLERRM; end if;
+  end;
+
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"product_id":"cccccccc-0000-4000-8000-000000000001","qty":1.5,"unit_price_paise":12000}]'::jsonb,
+      '[{"method":"cash","amount_paise":18000}]'::jsonb, null, 0, 'inv3-frac');
+    raise exception 'ASSERT: INV3 fractional catalogue qty accepted';
+  exception when invalid_parameter_value then
+    if position('whole units' in SQLERRM) = 0 then raise exception 'ASSERT: INV3 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+
+  select count(*) into v_n from public.sales where idempotency_key like 'inv3-%';
+  if v_n <> 0 then raise exception 'ASSERT: INV3 refused sales persisted'; end if;
+  select on_hand into v_n from public.inventory_by_store
+   where product_id = 'cccccccc-0000-4000-8000-000000000001' and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_n <> 117 then raise exception 'ASSERT: INV3 stock moved on refusal: %', v_n; end if;
+end $$;
+
+-- CASE: INV4 stock ops — receive/adjust are manager+, reason-guarded, replay-safe, and cross-tenant-safe; update_product flow
+do $$
+declare
+  v_res jsonb; v_n int; v_pid uuid; v_price bigint;
+begin
+  execute 'set local role authenticated';
+
+  -- staff cannot receive stock
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001',
+      'cccccccc-0000-4000-8000-000000000001', 5, null, 'inv4-staff');
+    raise exception 'ASSERT: INV4 staff received stock';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- manager receives +25, replayed with the same key → one movement only
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001',
+    'cccccccc-0000-4000-8000-000000000001', 25, 'Supplier delivery', 'inv4-receive') into v_res;
+  if (v_res ->> 'balance_after')::int <> 142 then raise exception 'ASSERT: INV4 receive balance wrong: %', v_res; end if;
+  select public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001',
+    'cccccccc-0000-4000-8000-000000000001', 25, 'Supplier delivery', 'inv4-receive') into v_res;
+  if not (v_res ->> 'replayed')::boolean then raise exception 'ASSERT: INV4 receive replay not flagged'; end if;
+
+  select count(*) into v_n from public.inventory_movements where idempotency_key = 'inv4-receive';
+  if v_n <> 1 then raise exception 'ASSERT: INV4 duplicate receipt movements: %', v_n; end if;
+
+  -- invalid quantity
+  begin
+    perform public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001',
+      'cccccccc-0000-4000-8000-000000000001', 0, null, 'inv4-zero');
+    raise exception 'ASSERT: INV4 zero receipt accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- adjustment needs a reason
+  begin
+    perform public.adjust_stock('bbbbbbbb-0000-4000-8000-000000000001',
+      'cccccccc-0000-4000-8000-000000000001', -5, '   ', 'inv4-noreason');
+    raise exception 'ASSERT: INV4 reasonless adjustment accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- valid adjustment −5 → 137
+  select public.adjust_stock('bbbbbbbb-0000-4000-8000-000000000001',
+    'cccccccc-0000-4000-8000-000000000001', -5, 'Damaged in transit', 'inv4-adjust') into v_res;
+  if (v_res ->> 'balance_after')::int <> 137 then raise exception 'ASSERT: INV4 adjust balance wrong: %', v_res; end if;
+
+  -- cannot adjust below available stock
+  begin
+    perform public.adjust_stock('bbbbbbbb-0000-4000-8000-000000000001',
+      'cccccccc-0000-4000-8000-000000000001', -99999, 'Impossible', 'inv4-overdraw');
+    raise exception 'ASSERT: INV4 overdraw accepted';
+  exception when invalid_parameter_value then
+    if position('insufficient_stock' in SQLERRM) = 0 then raise exception 'ASSERT: INV4 wrong message %', SQLERRM; end if;
+  end;
+
+  -- Volt's product cannot be received into an Ambika store
+  begin
+    perform public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001',
+      'cccccccc-0000-4000-8000-000000000007', 5, null, 'inv4-cross');
+    raise exception 'ASSERT: INV4 cross-tenant receipt accepted';
+  exception when invalid_parameter_value then
+    if position('product_not_in_business' in SQLERRM) = 0 then raise exception 'ASSERT: INV4 wrong message %', SQLERRM; end if;
+  end;
+
+  -- update_product: staff refused; manager re-prices; bad status refused; empty update refused
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.update_product('cccccccc-0000-4000-8000-000000000003', null, 9999);
+    raise exception 'ASSERT: INV4 staff re-priced a product';
+  exception when insufficient_privilege then null;
+  end;
+
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.update_product('cccccccc-0000-4000-8000-000000000003', null, 9000) into v_res;
+  if (v_res ->> 'price_paise')::bigint <> 9000 then raise exception 'ASSERT: INV4 re-price wrong: %', v_res; end if;
+
+  begin
+    perform public.update_product('cccccccc-0000-4000-8000-000000000003', null, null, null, null, null, null, null, 'deleted');
+    raise exception 'ASSERT: INV4 invalid status accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.update_product('cccccccc-0000-4000-8000-000000000003');
+    raise exception 'ASSERT: INV4 empty update accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- archive a fixture product → receipts refused afterwards
+  select public.create_product('aaaaaaaa-0000-4000-8000-000000000001', 'INV4 Archive Me', 'INV4-ARCH', 10000) into v_res;
+  v_pid := (v_res ->> 'product_id')::uuid;
+  perform public.update_product(v_pid, null, null, null, null, null, null, null, 'archived');
+  begin
+    perform public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001', v_pid, 5, null, 'inv4-archived');
+    raise exception 'ASSERT: INV4 archived product received stock';
+  exception when invalid_parameter_value then
+    if position('product_archived' in SQLERRM) = 0 then raise exception 'ASSERT: INV4 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+
+  select price_paise into v_price from public.products where id = 'cccccccc-0000-4000-8000-000000000003';
+  if v_price <> 9000 then raise exception 'ASSERT: INV4 catalogue price not persisted: %', v_price; end if;
+  select count(*) into v_n from public.audit_logs where action = 'product.updated'
+    and target_id = 'cccccccc-0000-4000-8000-000000000003';
+  if v_n <> 1 then raise exception 'ASSERT: INV4 product.updated audit missing'; end if;
+  select count(*) into v_n from public.audit_logs where action = 'stock.received'
+    and target_id = 'cccccccc-0000-4000-8000-000000000001';
+  if v_n <> 1 then raise exception 'ASSERT: INV4 replay double-audited: %', v_n; end if;
+end $$;
+
+-- CASE: INV5 void restocks catalogue lines with compensating sale_void movements
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_sale uuid; v_n int;
+begin
+  select id into v_mem from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"product_id":"cccccccc-0000-4000-8000-000000000001","qty":3,"unit_price_paise":12000}]'::jsonb,
+    '[{"method":"cash","amount_paise":36000}]'::jsonb, v_mem, 0, 'inv5-sale') into v_res;
+  v_sale := (v_res ->> 'sale_id')::uuid;
+  execute 'reset role';
+
+  select on_hand into v_n from public.inventory_by_store
+   where product_id = 'cccccccc-0000-4000-8000-000000000001' and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_n <> 134 then raise exception 'ASSERT: INV5 stock not decremented: %', v_n; end if;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.void_sale(v_sale, 'Customer changed mind') into v_res;
+  if (v_res ->> 'stock_lines_restored')::int <> 1 then raise exception 'ASSERT: INV5 restock count wrong: %', v_res; end if;
+  if (v_res ->> 'points_reversed')::int <> 36 then raise exception 'ASSERT: INV5 points reversal wrong: %', v_res; end if;
+  execute 'reset role';
+
+  select on_hand into v_n from public.inventory_by_store
+   where product_id = 'cccccccc-0000-4000-8000-000000000001' and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_n <> 137 then raise exception 'ASSERT: INV5 stock not restored: %', v_n; end if;
+  select count(*) into v_n from public.inventory_movements
+   where reason = 'sale_void' and product_id = 'cccccccc-0000-4000-8000-000000000001'
+     and delta = 3 and balance_after = 137 and reference_id = v_sale;
+  if v_n <> 1 then raise exception 'ASSERT: INV5 sale_void movement wrong'; end if;
+end $$;
+
+-- CASE: INV6 inventory_movements are immutable — triggers refuse postgres, grants refuse API roles
+do $$
+begin
+  -- even postgres (table owner) cannot rewrite movement history
+  begin
+    update public.inventory_movements set note = 'tampered' where id = (select min(id) from public.inventory_movements);
+    raise exception 'ASSERT: INV6 postgres updated a movement';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    delete from public.inventory_movements where id = (select min(id) from public.inventory_movements);
+    raise exception 'ASSERT: INV6 postgres deleted a movement';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- API roles have no DML grants at all
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    insert into public.inventory_movements (business_id, store_id, product_id, delta, balance_after, reason)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001',
+            'cccccccc-0000-4000-8000-000000000001', 1, 999, 'receipt');
+    raise exception 'ASSERT: INV6 owner inserted a movement directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update public.inventory_by_store set on_hand = 99999
+     where product_id = 'cccccccc-0000-4000-8000-000000000001';
+    raise exception 'ASSERT: INV6 owner rewrote stock directly';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: INV7 RLS visibility — staff+ see the business catalogue & stock; customers and other tenants see none
+do $$
+declare
+  v_n int;
+begin
+  execute 'set local role authenticated';
+
+  -- customer: no catalogue, no stock, no movements
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_n from public.products where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: INV7 customer sees % products', v_n; end if;
+  select count(*) into v_n from public.inventory_by_store;
+  if v_n <> 0 then raise exception 'ASSERT: INV7 customer sees stock rows'; end if;
+  select count(*) into v_n from public.inventory_movements;
+  if v_n <> 0 then raise exception 'ASSERT: INV7 customer sees movements'; end if;
+
+  -- Volt owner: only Volt's catalogue
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_n from public.products where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: INV7 Volt owner sees Ambika products'; end if;
+  select count(*) into v_n from public.products where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_n < 1 then raise exception 'ASSERT: INV7 Volt owner cannot see own products'; end if;
+
+  -- store-scoped staff: business-wide catalogue reads, but stock only for
+  -- their own stores (proposal §Store-scoped; the inventory policy inherits
+  -- the stores RLS scoping). Seeded Satellite rows: 6 products × 1 store.
+  perform set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+  select count(*) into v_n from public.products where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n < 6 then raise exception 'ASSERT: INV7 scoped staff sees % products, expected ≥6', v_n; end if;
+  select count(*) into v_n from public.inventory_by_store;
+  if v_n <> 6 then raise exception 'ASSERT: INV7 scoped staff sees % stock rows, expected exactly their 6 store rows', v_n; end if;
+
+  -- manager: business-wide stock, never the other tenant's
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select count(*) into v_n from public.inventory_by_store;
+  if v_n < 12 then raise exception 'ASSERT: INV7 manager sees % stock rows, expected ≥12', v_n; end if;
+  select count(*) into v_n from public.inventory_by_store
+   where store_id = 'bbbbbbbb-0000-4000-8000-000000000009';
+  if v_n <> 0 then raise exception 'ASSERT: INV7 Ambika manager sees Volt stock rows'; end if;
+  execute 'reset role';
+end $$;
+
+-- CASE: INV8 no DML grants — even owners cannot write products or stock directly (RPC-only)
+do $$
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+
+  begin
+    insert into public.products (business_id, sku, name, price_paise)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'INV8-DIRECT', 'Direct insert', 100);
+    raise exception 'ASSERT: INV8 owner inserted a product directly';
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    update public.products set price_paise = 1 where sku = 'AMB-LGT-009';
+    raise exception 'ASSERT: INV8 owner updated a product directly';
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    insert into public.inventory_by_store (product_id, store_id, on_hand)
+    values ('cccccccc-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001', 5);
+    raise exception 'ASSERT: INV8 owner inserted a stock row directly';
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    delete from public.products where sku = 'AMB-LGT-009';
+    raise exception 'ASSERT: INV8 owner deleted a product';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;

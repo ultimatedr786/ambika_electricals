@@ -221,7 +221,75 @@ begin
    where customer_membership_id = v_priya;
 end $$;
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- Slice 3 seed: product catalogue + per-store stock + opening 'initial'
+-- movements. Mirrors the Phase-1 mock catalogue (same SKUs/names/prices) so
+-- the live POS feels familiar. Real stock history starts here; no sales are
+-- seeded (the POS starts empty by design).
+-- ─────────────────────────────────────────────────────────────────────────
+do $$
+declare
+  v_biz        uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  v_volt       uuid := 'aaaaaaaa-0000-4000-8000-000000000002';
+  v_main       uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
+  v_sat        uuid := 'bbbbbbbb-0000-4000-8000-000000000002';
+  v_volt_store uuid := 'bbbbbbbb-0000-4000-8000-000000000009';
+  p record;
+begin
+  insert into public.products
+    (id, business_id, sku, name, category, subcategory, unit, mrp_paise, price_paise, art_key)
+  values
+    ('cccccccc-0000-4000-8000-000000000001', v_biz, 'AMB-LGT-009', 'Philips 9W LED Bulb',
+     'Lighting', 'LED Bulbs', 'piece', 16500, 12000, 'bulb'),
+    ('cccccccc-0000-4000-8000-000000000002', v_biz, 'AMB-LGT-020', 'Wipro 20W LED Tube Light',
+     'Lighting', 'Tube Lights', 'piece', 45000, 34000, 'tube'),
+    ('cccccccc-0000-4000-8000-000000000003', v_biz, 'AMB-SWT-006', 'Anchor Modular Switch 6A',
+     'Switches & Sockets', 'Switches', 'piece', 11000, 8500, 'switch'),
+    ('cccccccc-0000-4000-8000-000000000004', v_biz, 'AMB-WIR-015', 'Polycab 1.5 sq mm FR Wire (90m)',
+     'Wires & Cables', 'House Wire', 'coil', 178000, 145000, 'wire'),
+    ('cccccccc-0000-4000-8000-000000000005', v_biz, 'AMB-PRT-032', 'Schneider 32A MCB Single Pole',
+     'Protection', 'MCB', 'piece', 47000, 38000, 'mcb'),
+    ('cccccccc-0000-4000-8000-000000000006', v_biz, 'AMB-FAN-120', 'Crompton Ceiling Fan 1200mm',
+     'Fans', 'Ceiling Fan', 'piece', 320000, 245000, 'fan'),
+    ('cccccccc-0000-4000-8000-000000000007', v_volt, 'VLT-FAN-001', 'Volt Ceiling Fan 1200mm',
+     'Fans', 'Ceiling Fan', 'piece', 340000, 265000, 'fan')
+  on conflict (business_id, sku) do nothing;
+
+  -- Opening stock: (product, store, qty, reorder_level)
+  for p in
+    select * from (values
+      ('cccccccc-0000-4000-8000-000000000001'::uuid, v_main, 120, 24),
+      ('cccccccc-0000-4000-8000-000000000001'::uuid, v_sat,   60, 24),
+      ('cccccccc-0000-4000-8000-000000000002'::uuid, v_main,  40,  8),
+      ('cccccccc-0000-4000-8000-000000000002'::uuid, v_sat,   20,  8),
+      ('cccccccc-0000-4000-8000-000000000003'::uuid, v_main, 150, 30),
+      ('cccccccc-0000-4000-8000-000000000003'::uuid, v_sat,   80, 30),
+      ('cccccccc-0000-4000-8000-000000000004'::uuid, v_main,  24,  6),
+      ('cccccccc-0000-4000-8000-000000000004'::uuid, v_sat,   12,  6),
+      ('cccccccc-0000-4000-8000-000000000005'::uuid, v_main,  55, 12),
+      ('cccccccc-0000-4000-8000-000000000005'::uuid, v_sat,   30, 12),
+      ('cccccccc-0000-4000-8000-000000000006'::uuid, v_main,  12,  4),
+      ('cccccccc-0000-4000-8000-000000000006'::uuid, v_sat,    6,  4),
+      ('cccccccc-0000-4000-8000-000000000007'::uuid, v_volt_store, 15, 5)
+    ) as t(product_id, store_id, qty, reorder_level)
+  loop
+    insert into public.inventory_by_store (product_id, store_id, on_hand, reorder_level)
+    values (p.product_id, p.store_id, p.qty, p.reorder_level)
+    on conflict (product_id, store_id) do nothing;
+
+    insert into public.inventory_movements
+      (business_id, store_id, product_id, delta, balance_after, reason,
+       reference_type, reference_id, note, idempotency_key)
+    values
+      (case when p.product_id = 'cccccccc-0000-4000-8000-000000000007' then v_volt else v_biz end,
+       p.store_id, p.product_id, p.qty, p.qty, 'initial',
+       'product', p.product_id, 'Opening stock (seed)',
+       'seed-inv:' || p.product_id::text || ':' || p.store_id::text)
+    on conflict (business_id, idempotency_key) where idempotency_key is not null do nothing;
+  end loop;
+end $$;
+
 do $$
 begin
-  raise notice 'Dev seed complete: Ambika Electricals (owner dev-ambika-owner@ambika.local), manager, 2 store-scoped staff, customers Rahul/Priya, second tenant Volt & Co, 1 pending invitation (dev token devlocal0000...0000), points ledger history (Rahul 420 pts, Priya 150 pts). No usable passwords exist — use Supabase Auth email flows locally.';
+  raise notice 'Dev seed complete: Ambika Electricals (owner dev-ambika-owner@ambika.local), manager, 2 store-scoped staff, customers Rahul/Priya, second tenant Volt & Co, 1 pending invitation (dev token devlocal0000...0000), points ledger history (Rahul 420 pts, Priya 150 pts), product catalogue (6 Ambika + 1 Volt) with per-store opening stock and initial movements. No usable passwords exist — use Supabase Auth email flows locally.';
 end $$;
