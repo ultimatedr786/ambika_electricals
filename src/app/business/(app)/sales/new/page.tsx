@@ -27,6 +27,8 @@ import { useServices } from "@/lib/services";
 import { calculatePoints } from "@/lib/points";
 import { productCategories } from "@/lib/mock-data/products";
 import { cn, formatINR, formatNumber, initials } from "@/lib/utils";
+import { LivePosPanel } from "@/components/business/live-pos-panel";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import type { Customer, Product, Sale } from "@/types";
 
 /**
@@ -231,6 +233,18 @@ export default function NewSalePage() {
         </div>
         <Button variant="ghost" size="sm" asChild><Link href="/business/sales"><X /> Cancel</Link></Button>
       </div>
+
+      {/* Live Supabase POS — renders only when auth is configured */}
+      <LivePosPanel />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2 pt-1">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype billing flow</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data — product catalogue migrates in a later slice
+          </span>
+        </div>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-5">

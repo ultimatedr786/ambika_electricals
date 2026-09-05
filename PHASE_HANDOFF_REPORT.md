@@ -16,11 +16,38 @@ reason mandatory), `point_balance`, idempotency-key replay safety, full audit
 events (`points.awarded/redeemed/adjusted`) and RLS (own-memberships for
 customers, business-wide for staff+, SELECT-only grants, double-locked
 immutability). Seed now carries ledger history (Rahul 420 pts, Priya 150 pts).
-Harness: **52/52** (new L1–L10 series, `RLS_TEST_RESULTS.md` Run 2); pgTAP
-mirror extended to **69 assertions**. `RLS_POLICIES.md` matrix/RPC/test docs
-updated. UI/service integration deliberately lands with the sales slice (the
-next item in §4) so the ledger is never writable from a screen without a real
-sale/enrollment behind it.
+
+## ADDENDUM 2 (2026-09-06) — Slice 2 delivered: server-authoritative sales
+
+Item 2 of §4 is **implemented and proven**:
+`supabase/migrations/20260906130000_sales.sql` adds `sales` + `sale_items`
+(snapshot lines) + `sale_payments` (split-ready, `points` method reserved for
+redemptions) + locked per-business `invoice_counters`, launch-policy earn
+columns on `businesses` (₹100 → 10 pts), and the RPCs `create_sale`
+(staff+, store-scope aware, server-computed totals, exact-payment validation,
+idempotent replay, atomic ledger earn + `sale.created` audit) and `void_sale`
+(manager+, reason required, status flip + compensating adjust entry — never a
+delete). Documented deviations from proposal §8.1 (snapshot pricing until the
+products slice, policy columns until rule sets, row-level idempotency) are in
+`RLS_POLICIES.md` §6 and the migration header.
+
+UI landed with the slice (real-mode sections, prototype flows kept and
+labeled): `sales-actions.ts` server actions (denial-audited like
+`team-actions.ts`), **Live POS** on `/business/sales/new` (store picker with
+scope filtering, member search + inline RLS-guarded enrollment, cart with
+server-authoritative totals preview, exact-total payment, points preview,
+receipt from the RPC), **Live sales** on `/business/sales` (recent rows,
+manager+ void with mandatory reason) and a **Live points** card on the
+customer dashboard (own-membership balance, lifetime stats, last ledger
+entries).
+
+Proof for both slices: harness **61/61** (S/A/W/R/V + L1–L10 + SA1–SA9,
+`RLS_TEST_RESULTS.md` Runs 2–3); pgTAP mirror at **87 assertions**; tsc/lint
+clean (warnings match pre-existing app-wide idioms), unit tests 8/8. Next:
+Slice 3 inventory (`products`, `inventory_by_store`, append-only
+`inventory_movements`, stock validation + decrement inside `create_sale`,
+server re-pricing from `products` superseding snapshots), then redemptions
+and the rewards catalogue.
 
 ---
 

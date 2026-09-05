@@ -19,6 +19,8 @@ import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { useStore } from "@/lib/store";
+import { LiveSalesPanel } from "@/components/business/live-sales-panel";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import { formatDate, formatDateTime, formatINR, formatNumber } from "@/lib/utils";
 import type { Sale } from "@/types";
 
@@ -93,6 +95,18 @@ export default function SalesPage() {
         description="Every invoice raised at Ambika Electricals."
         actions={<Button asChild><Link href="/business/sales/new"><Plus /> New Sale</Link></Button>}
       />
+
+      {/* Live Supabase sales — renders only when auth is configured */}
+      <LiveSalesPanel />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype sales</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data — migrates in a later slice
+          </span>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-3">
         <Card className="p-4"><p className="text-xs text-muted-foreground">Invoices</p><p className="mt-1 text-xl font-semibold tabular">{results.length}</p></Card>
