@@ -1,0 +1,12 @@
+{
+  "name": "Ambika Electricals Rewards",
+  "short_name": "AE Rewards",
+  "description": "Loyalty and rewards for Ambika Electricals.",
+  "start_url": "/customer/dashboard",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2a6ff0",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

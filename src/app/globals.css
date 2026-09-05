@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 99%;
+    --foreground: 222 32% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 32% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 32% 12%;
+    --primary: 218 92% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 32% 96%;
+    --secondary-foreground: 222 32% 16%;
+    --muted: 214 32% 96%;
+    --muted-foreground: 218 12% 44%;
+    --accent: 214 100% 96%;
+    --accent-foreground: 218 82% 34%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 62% 36%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 30 60% 12%;
+    --border: 214 24% 90%;
+    --input: 214 24% 89%;
+    --ring: 218 92% 55%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 222 40% 7%;
+    --foreground: 210 30% 96%;
+    --card: 222 34% 10%;
+    --card-foreground: 210 30% 96%;
+    --popover: 222 34% 10%;
+    --popover-foreground: 210 30% 96%;
+    --primary: 214 100% 66%;
+    --primary-foreground: 222 45% 8%;
+    --secondary: 220 24% 16%;
+    --secondary-foreground: 210 30% 94%;
+    --muted: 220 24% 15%;
+    --muted-foreground: 216 14% 65%;
+    --accent: 218 40% 18%;
+    --accent-foreground: 210 60% 88%;
+    --destructive: 0 68% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 52% 46%;
+    --success-foreground: 150 40% 8%;
+    --warning: 40 92% 58%;
+    --warning-foreground: 30 60% 10%;
+    --border: 220 20% 20%;
+    --input: 220 20% 22%;
+    --ring: 214 100% 66%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer utilities {
+  .safe-bottom {
+    padding-bottom: max(env(safe-area-inset-bottom), 0.5rem);
+  }
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  .grid-lines {
+    background-image: linear-gradient(hsl(var(--border) / 0.6) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--border) / 0.6) 1px, transparent 1px);
+    background-size: 28px 28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
