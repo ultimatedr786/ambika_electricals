@@ -106,9 +106,16 @@ export function LiveTeamPanel() {
     }
     setLoading(true);
     try {
+      // Own membership only — managers+ can otherwise read the whole roster
+      // under the management policy and rows[0] might be another member.
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
       const { data: me } = await supabase
         .from("business_memberships")
         .select("business_id, role, profile_id")
+        .eq("profile_id", user.id)
         .eq("status", "active");
       const rows = (me ?? []) as { business_id: string; role: LiveRole; profile_id: string }[];
       if (rows.length === 0 || rows[0].role === "staff") {

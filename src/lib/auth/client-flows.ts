@@ -15,9 +15,17 @@ import { homeForViewer, type BusinessRole } from "@/lib/auth/redirects";
 export async function resolveRoleHome(
   supabase: BrowserSupabaseClient
 ): Promise<"/business/dashboard" | "/customer/dashboard"> {
+  // Filter on the viewer's OWN profile id: managers+ can also read every
+  // membership row of their business under the management policy, so an
+  // unfiltered query could pick up someone else's role.
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return homeForViewer({ businessRoles: [] });
   const { data } = await supabase
     .from("business_memberships")
     .select("role")
+    .eq("profile_id", user.id)
     .eq("status", "active");
   const roles = ((data ?? []) as { role: BusinessRole }[]).map((r) => r.role);
   return homeForViewer({ businessRoles: roles });
