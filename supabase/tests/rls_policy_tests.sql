@@ -71,7 +71,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(69);
+select plan(87);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -554,6 +554,149 @@ select is(
            current_setting('app.ledger_mem', true)))::int,
   0,
   'L9: other tenants never see the ledger'
+);
+
+-- ---------------------------------------------------------------------------
+-- SA series — server-authoritative sales (Slice 2). The suite transaction is
+-- rolled back, so fixture sales/members vanish cleanly.
+-- pgtap-sa1 sells into Rahul's SEEDED membership (deterministic 420-point
+-- balance from seed.sql), so post-sale cache assertions are absolute.
+-- ---------------------------------------------------------------------------
+select set_config('app.sale_mem', id::text, true)
+  from public.customer_memberships
+ where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+
+select lives_ok(
+  format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+    ''[{"name":"Wiring kit","qty":1,"unit_price_paise":100000},{"name":"LED bulb 9W","qty":5,"unit_price_paise":5000}]''::jsonb,
+    ''[{"method":"upi","amount_paise":125000}]''::jsonb, %L::uuid, 0, ''pgtap-sa1'')',
+    current_setting('app.sale_mem', true)),
+  'SA1: staff records a member sale'
+);
+select is(
+  (select total_paise from public.sales where idempotency_key = 'pgtap-sa1'),
+  125000::bigint,
+  'SA1: totals are computed server-side'
+);
+select is(
+  (select base_points from public.sales where idempotency_key = 'pgtap-sa1'),
+  125,
+  'SA1: launch policy points (Rs100 -> 10 pts) on Rs1,250'
+);
+select is(
+  (select current_points from public.customer_points_balance
+    where customer_membership_id = current_setting('app.sale_mem', true)::uuid),
+  545,
+  'SA1: balance cache = seed 420 + 125'
+);
+select ok(
+  exists (select 1 from public.audit_logs al
+           join public.sales s on s.id::text = al.target_id
+          where al.action = 'sale.created' and s.idempotency_key = 'pgtap-sa1'),
+  'SA1: sale creation is audited'
+);
+
+select lives_ok(
+  'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+    ''[{"name":"MCB 32A","qty":2,"unit_price_paise":45000}]''::jsonb,
+    ''[{"method":"cash","amount_paise":90000}]''::jsonb, null, 0, ''pgtap-sa2'')',
+  'SA2: walk-in sale succeeds'
+);
+select is(
+  (select total_points from public.sales where idempotency_key = 'pgtap-sa2'),
+  0,
+  'SA2: walk-ins earn no points'
+);
+
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"x","qty":1,"unit_price_paise":100}]''::jsonb,
+      ''[{"method":"cash","amount_paise":100}]''::jsonb, null, 0, ''pgtap-sa3-cust'')'),
+  '42501',
+  'SA3: customers cannot record sales'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"x","qty":1,"unit_price_paise":100}]''::jsonb,
+      ''[{"method":"cash","amount_paise":100}]''::jsonb, null, 0, ''pgtap-sa3-volt'')'),
+  '42501',
+  'SA3: other tenants cannot record sales'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '44444444-4444-4444-8444-444444444444',
+    'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"x","qty":1,"unit_price_paise":100}]''::jsonb,
+      ''[{"method":"cash","amount_paise":100}]''::jsonb, null, 0, ''pgtap-sa3-scope'')'),
+  '42501',
+  'SA3: store-scoped staff cannot sell outside their stores'
+);
+
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"x","qty":1,"unit_price_paise":10000}]''::jsonb,
+      ''[{"method":"cash","amount_paise":9999}]''::jsonb, null, 0, ''pgtap-sa5'')'),
+  '22023',
+  'SA5: payments must equal the server-computed total'
+);
+
+select lives_ok(
+  format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+    ''[{"name":"Cable","qty":1,"unit_price_paise":50000}]''::jsonb,
+    ''[{"method":"cash","amount_paise":50000}]''::jsonb, %L::uuid, 0, ''pgtap-sa7'')',
+    current_setting('app.sale_mem', true)),
+  'SA7: fixture sale for voiding'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.void_sale((select id from public.sales where idempotency_key = ''pgtap-sa7''), ''staff attempt'')')),
+  '42501',
+  'SA7: staff cannot void sales'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.void_sale((select id from public.sales where idempotency_key = ''pgtap-sa7''), ''Billing mistake'')')),
+  'NO_ERROR',
+  'SA7: managers can void with a reason'
+);
+select is(
+  (select status::text from public.sales where idempotency_key = 'pgtap-sa7'),
+  'voided',
+  'SA7: voided status is set (row never deleted)'
+);
+select ok(
+  exists (select 1 from public.points_ledger l
+           join public.sales s on s.id = l.source_id
+          where s.idempotency_key = 'pgtap-sa7' and l.entry_type = 'adjust' and l.points < 0),
+  'SA7: points are reversed via a compensating adjust entry'
+);
+
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.sales where idempotency_key = ''pgtap-sa1''')::int,
+  1,
+  'SA8: customers see their own sales'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.sales where idempotency_key = ''pgtap-sa2''')::int,
+  0,
+  'SA8: customers never see walk-in or other members'' sales'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.sales where business_id = ''aaaaaaaa-0000-4000-8000-000000000001''')::int,
+  0,
+  'SA8: other tenants never see the sales'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'insert into public.sales (business_id, store_id, invoice_no, subtotal_paise, total_paise)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''bbbbbbbb-0000-4000-8000-000000000001'', ''INV-999999'', 100, 100)'),
+  '42501',
+  'SA9: even owners cannot insert sales directly (RPC-only)'
 );
 
 select * from finish();

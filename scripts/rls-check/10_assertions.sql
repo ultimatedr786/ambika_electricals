@@ -1424,3 +1424,387 @@ begin
   exception when invalid_parameter_value then null;
   end;
 end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SA cases — server-authoritative sales (Slice 2). Cases COMMIT; each creates
+-- its own fixtures (memberships) and unique idempotency keys. Voided sales
+-- flip status (sales are not immutable) but nothing is ever deleted.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- CASE: SA1 sales — staff records a member sale: totals, points, invoice, payment, ledger and audit all in sync
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_n int; v_points int;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'SA1 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  -- ₹1,250.00 = 125000 paise → floor(125000 × 10 / 10000) = 125 points
+  select public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Wiring kit","sku":"WK-100","qty":1,"unit_price_paise":100000},{"name":"LED bulb 9W","qty":5,"unit_price_paise":5000}]'::jsonb,
+    '[{"method":"upi","amount_paise":125000}]'::jsonb,
+    v_mem, 0, 'sa1-key'
+  ) into v_res;
+
+  if (v_res ->> 'total_paise')::bigint <> 125000 then raise exception 'ASSERT: SA1 total wrong: %', v_res; end if;
+  if (v_res -> 'points' ->> 'base')::int <> 125 then raise exception 'ASSERT: SA1 points wrong: %', v_res; end if;
+  if (v_res ->> 'balance_after')::int <> 125 then raise exception 'ASSERT: SA1 balance wrong: %', v_res; end if;
+  if (v_res ->> 'invoice_no') !~ '^INV-[0-9]{6}$' then raise exception 'ASSERT: SA1 invoice format: %', v_res; end if;
+
+  execute 'reset role';
+
+  select count(*) into v_n from public.sale_items where sale_id = (v_res ->> 'sale_id')::uuid;
+  if v_n <> 2 then raise exception 'ASSERT: SA1 expected 2 sale_items, got %', v_n; end if;
+  select count(*) into v_n from public.sale_payments where sale_id = (v_res ->> 'sale_id')::uuid and method = 'upi';
+  if v_n <> 1 then raise exception 'ASSERT: SA1 payment row missing'; end if;
+  select count(*) into v_n from public.points_ledger
+   where source_type = 'sale' and source_id = (v_res ->> 'sale_id')::uuid and points = 125;
+  if v_n <> 1 then raise exception 'ASSERT: SA1 ledger earn entry missing'; end if;
+  select total_points into v_points from public.sales where id = (v_res ->> 'sale_id')::uuid;
+  if v_points <> 125 then raise exception 'ASSERT: SA1 sale.total_points wrong'; end if;
+  select count(*) into v_n from public.audit_logs
+   where action = 'sale.created' and target_id = (v_res ->> 'sale_id');
+  if v_n <> 1 then raise exception 'ASSERT: SA1 sale.created audit missing'; end if;
+end $$;
+
+-- CASE: SA2 sales — walk-in sale earns no points and writes no ledger entry
+do $$
+declare
+  v_res jsonb; v_n int;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"MCB 32A","qty":2,"unit_price_paise":45000}]'::jsonb,
+    '[{"method":"cash","amount_paise":90000}]'::jsonb,
+    null, 0, 'sa2-key'
+  ) into v_res;
+  execute 'reset role';
+
+  if (v_res -> 'points' ->> 'total')::int <> 0 then raise exception 'ASSERT: SA2 walk-in earned points'; end if;
+  if (v_res ->> 'balance_after') is not null then raise exception 'ASSERT: SA2 walk-in has a balance'; end if;
+  select count(*) into v_n from public.points_ledger where source_id = (v_res ->> 'sale_id')::uuid;
+  if v_n <> 0 then raise exception 'ASSERT: SA2 ledger entry written for walk-in'; end if;
+end $$;
+
+-- CASE: SA3 sales — authorization: customers, other tenants and store-scoped staff are refused (42501)
+do $$
+declare
+  v_mem uuid;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', '55555555-5555-4555-8555-555555555555', 'SA3 Rahul', 'active')
+  on conflict do nothing;
+  select id into v_mem from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+
+  execute 'set local role authenticated';
+
+  -- customer cannot sell
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":1,"unit_price_paise":100}]'::jsonb,
+      '[{"method":"cash","amount_paise":100}]'::jsonb, v_mem, 0, 'sa3-customer');
+    raise exception 'ASSERT: SA3 customer recorded a sale';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Volt owner cannot sell into Ambika's store
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":1,"unit_price_paise":100}]'::jsonb,
+      '[{"method":"cash","amount_paise":100}]'::jsonb, null, 0, 'sa3-volt');
+    raise exception 'ASSERT: SA3 cross-tenant sale recorded';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- staff-satellite (scoped to Satellite store) cannot sell at Main store
+  perform set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":1,"unit_price_paise":100}]'::jsonb,
+      '[{"method":"cash","amount_paise":100}]'::jsonb, null, 0, 'sa3-scoped');
+    raise exception 'ASSERT: SA3 store-scoped staff sold outside their store';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- ...but CAN sell at their own store
+  perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000002',
+      '[{"name":"x","qty":1,"unit_price_paise":100}]'::jsonb,
+      '[{"method":"cash","amount_paise":100}]'::jsonb, null, 0, 'sa3-scoped-ok');
+  execute 'reset role';
+end $$;
+
+-- CASE: SA4 sales — idempotency key replay returns the stored sale without double-posting
+do $$
+declare
+  v_mem uuid; v_res1 jsonb; v_res2 jsonb; v_n int;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'SA4 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Fan","qty":1,"unit_price_paise":250000}]'::jsonb,
+    '[{"method":"card","amount_paise":250000}]'::jsonb, v_mem, 0, 'sa4-key') into v_res1;
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Fan","qty":1,"unit_price_paise":250000}]'::jsonb,
+    '[{"method":"card","amount_paise":250000}]'::jsonb, v_mem, 0, 'sa4-key') into v_res2;
+  execute 'reset role';
+
+  if not (v_res2 ->> 'replayed')::boolean then raise exception 'ASSERT: SA4 second call not replayed'; end if;
+  if (v_res1 ->> 'sale_id') <> (v_res2 ->> 'sale_id') then raise exception 'ASSERT: SA4 replay returned a different sale'; end if;
+  select count(*) into v_n from public.sales where idempotency_key = 'sa4-key';
+  if v_n <> 1 then raise exception 'ASSERT: SA4 duplicate sales: %', v_n; end if;
+  select count(*) into v_n from public.points_ledger where idempotency_key = 'sale:' || (v_res1 ->> 'sale_id');
+  if v_n <> 1 then raise exception 'ASSERT: SA4 duplicate ledger entries: %', v_n; end if;
+end $$;
+
+-- CASE: SA5 sales — money validation: payment mismatch, bad method, bad qty/price, discount over subtotal
+do $$
+declare
+  v_msg text;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":1,"unit_price_paise":10000}]'::jsonb,
+      '[{"method":"cash","amount_paise":9999}]'::jsonb, null, 0, 'sa5-mismatch');
+    raise exception 'ASSERT: SA5 payment mismatch accepted';
+  exception when invalid_parameter_value then
+    v_msg := SQLERRM;
+    if position('payment_mismatch' in v_msg) = 0 then raise exception 'ASSERT: SA5 wrong message %', v_msg; end if;
+  end;
+
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":1,"unit_price_paise":10000}]'::jsonb,
+      '[{"method":"bitcoin","amount_paise":10000}]'::jsonb, null, 0, 'sa5-method');
+    raise exception 'ASSERT: SA5 invalid payment method accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":0,"unit_price_paise":10000}]'::jsonb,
+      '[{"method":"cash","amount_paise":0}]'::jsonb, null, 0, 'sa5-qty');
+    raise exception 'ASSERT: SA5 zero qty accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":1,"unit_price_paise":10000}]'::jsonb,
+      '[{"method":"cash","amount_paise":5000}]'::jsonb, null, 999999, 'sa5-discount');
+    raise exception 'ASSERT: SA5 over-subtotal discount accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001', '[]'::jsonb,
+      '[{"method":"cash","amount_paise":1}]'::jsonb, null, 0, 'sa5-empty');
+    raise exception 'ASSERT: SA5 empty sale accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  execute 'reset role';
+end $$;
+
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.sales where idempotency_key like 'sa5-%';
+  if v_n <> 0 then raise exception 'ASSERT: SA5 rejected sales were persisted: %', v_n; end if;
+end $$;
+
+-- CASE: SA6 sales — invoice numbers are sequential per business and independent across tenants
+do $$
+declare
+  v_res jsonb; v_inv1 text; v_inv2 text; v_volt_inv text;
+begin
+  execute 'set local role authenticated';
+
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000009',
+    '[{"name":"Volt item","qty":1,"unit_price_paise":50000}]'::jsonb,
+    '[{"method":"cash","amount_paise":50000}]'::jsonb, null, 0, 'sa6-volt-1') into v_res;
+  v_volt_inv := v_res ->> 'invoice_no';
+
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"a","qty":1,"unit_price_paise":1000}]'::jsonb,
+    '[{"method":"cash","amount_paise":1000}]'::jsonb, null, 0, 'sa6-amb-1') into v_res;
+  v_inv1 := v_res ->> 'invoice_no';
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"b","qty":1,"unit_price_paise":2000}]'::jsonb,
+    '[{"method":"cash","amount_paise":2000}]'::jsonb, null, 0, 'sa6-amb-2') into v_res;
+  v_inv2 := v_res ->> 'invoice_no';
+  execute 'reset role';
+
+  if v_volt_inv <> 'INV-000001' then raise exception 'ASSERT: SA6 Volt counter should start at 1, got %', v_volt_inv; end if;
+  if (substr(v_inv2, 5))::bigint <> (substr(v_inv1, 5))::bigint + 1 then
+    raise exception 'ASSERT: SA6 Ambika sequence not consecutive: %, %', v_inv1, v_inv2;
+  end if;
+  if v_inv1 = v_volt_inv and (select count(*) from public.sales) > 1 then
+    raise exception 'ASSERT: SA6 tenants must have independent counters';
+  end if;
+end $$;
+
+-- CASE: SA7 sales — void is manager+, reason-required, reverses points with a compensating entry, and is final
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_sale uuid; v_bal int; v_n int; v_status public.sale_status;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'SA7 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+
+  -- staff records ₹500 → 50 points
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Cable","qty":1,"unit_price_paise":50000}]'::jsonb,
+    '[{"method":"cash","amount_paise":50000}]'::jsonb, v_mem, 0, 'sa7-key') into v_res;
+  v_sale := (v_res ->> 'sale_id')::uuid;
+
+  -- staff cannot void
+  begin
+    perform public.void_sale(v_sale, 'mistake');
+    raise exception 'ASSERT: SA7 staff voided a sale';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- manager needs a reason
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.void_sale(v_sale, '   ');
+    raise exception 'ASSERT: SA7 blank void reason accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- manager voids for real
+  select public.void_sale(v_sale, 'Billing mistake') into v_res;
+  if (v_res ->> 'points_reversed')::int <> 50 then raise exception 'ASSERT: SA7 points_reversed wrong: %', v_res; end if;
+  if (v_res ->> 'balance_after')::int <> 0 then raise exception 'ASSERT: SA7 balance not back to 0: %', v_res; end if;
+  execute 'reset role';
+
+  select status into v_status from public.sales where id = v_sale;
+  if v_status <> 'voided' then raise exception 'ASSERT: SA7 status not voided'; end if;
+  select count(*) into v_n from public.points_ledger
+   where entry_type = 'adjust' and points = -50 and source_id = v_sale;
+  if v_n <> 1 then raise exception 'ASSERT: SA7 compensating adjust entry missing'; end if;
+  select count(*) into v_n from public.audit_logs where action = 'sale.voided' and target_id = v_sale::text;
+  if v_n <> 1 then raise exception 'ASSERT: SA7 sale.voided audit missing'; end if;
+
+  -- second void is refused
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.void_sale(v_sale, 'again');
+    raise exception 'ASSERT: SA7 double void accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: SA8 sales — RLS visibility: customers see only their own sales; staff whole business; never cross-tenant
+do $$
+declare
+  v_rahul_mem uuid; v_other_mem uuid; v_res jsonb;
+  v_own int; v_other int; v_volt int; v_items int;
+begin
+  select id into v_rahul_mem from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'SA8 Other', 'active')
+  returning id into v_other_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Rahul item","qty":1,"unit_price_paise":30000}]'::jsonb,
+    '[{"method":"cash","amount_paise":30000}]'::jsonb, v_rahul_mem, 0, 'sa8-rahul') into v_res;
+  select public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Other item","qty":1,"unit_price_paise":31000}]'::jsonb,
+    '[{"method":"cash","amount_paise":31000}]'::jsonb, v_other_mem, 0, 'sa8-other') into v_res;
+
+  -- Rahul: only his own sale (+ items through the parent-sale policy)
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_own from public.sales where customer_membership_id = v_rahul_mem and idempotency_key = 'sa8-rahul';
+  if v_own <> 1 then raise exception 'ASSERT: SA8 Rahul cannot see his own sale'; end if;
+  select count(*) into v_other from public.sales where customer_membership_id = v_other_mem;
+  if v_other <> 0 then raise exception 'ASSERT: SA8 Rahul sees another member''s sale'; end if;
+  select count(*) into v_volt from public.sales where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_volt <> 0 then raise exception 'ASSERT: SA8 Rahul sees Volt sales'; end if;
+  select count(*) into v_items from public.sale_items si
+    where si.sale_id in (select s.id from public.sales s where s.idempotency_key = 'sa8-rahul');
+  if v_items <> 1 then raise exception 'ASSERT: SA8 Rahul cannot see his own sale items'; end if;
+  select count(*) into v_items from public.sale_items si
+    where si.sale_id in (select s.id from public.sales s where s.idempotency_key = 'sa8-other');
+  if v_items <> 0 then raise exception 'ASSERT: SA8 Rahul sees another member''s sale items'; end if;
+
+  -- staff-main: sees both Ambika sales, no Volt sales
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_own from public.sales where idempotency_key like 'sa8-%';
+  if v_own <> 2 then raise exception 'ASSERT: SA8 staff sees % sa8 sales, expected 2', v_own; end if;
+
+  -- Volt owner: zero Ambika sales
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_volt from public.sales where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_volt <> 0 then raise exception 'ASSERT: SA8 Volt owner sees % Ambika sales, expected 0', v_volt; end if;
+  execute 'reset role';
+end $$;
+
+-- CASE: SA9 sales — no DML grants: API roles cannot insert/update sales, items, payments or counters
+do $$
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+
+  begin
+    insert into public.sales (business_id, store_id, invoice_no, subtotal_paise, total_paise)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001',
+            'INV-999999', 100, 100);
+    raise exception 'ASSERT: SA9 owner inserted a sale directly';
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    update public.sales set total_paise = 1 where invoice_no = 'INV-999999';
+    raise exception 'ASSERT: SA9 owner updated sales directly';
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    insert into public.sale_payments (sale_id, method, amount_paise)
+    values (gen_random_uuid(), 'cash', 100);
+    raise exception 'ASSERT: SA9 owner inserted a payment directly';
+  exception when insufficient_privilege then null;
+  end;
+
+  begin
+    update public.invoice_counters set next_seq = 999;
+    raise exception 'ASSERT: SA9 owner touched the invoice counter';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- counters are invisible to API roles (no SELECT grant at all)
+  begin
+    perform count(*) from public.invoice_counters;
+    raise exception 'ASSERT: SA9 invoice counters readable by API roles';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;

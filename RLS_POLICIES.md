@@ -46,6 +46,9 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `audit_logs` SELECT | ✗ | ✗ | ✗ | own business (+ `super_admin` for platform events) | INSERT/UPDATE/DELETE: no grants **and** an immutability trigger that rejects mutation even for the table owner; written only by definer RPCs / service role |
 | `points_ledger` SELECT | **own memberships' entries only** | whole business | whole business | whole business | APPEND-ONLY: no INSERT/UPDATE/DELETE grants for API roles **and** an immutability trigger rejecting mutation even for postgres; written only by `award/spend/adjust_points` RPCs; insert trigger enforces membership/business/store integrity + active status |
 | `customer_points_balance` SELECT | own memberships | whole business | whole business | whole business | transactional cache of the ledger (never authoritative); no DML grants — maintained inside the ledger RPC transactions only |
+| `sales` SELECT | **own sales only** (via own memberships) | whole business | whole business | whole business | writes RPC-only (`create_sale`/`void_sale`); voiding flips `status` — rows are never deleted |
+| `sale_items` / `sale_payments` SELECT | follows parent sale (`EXISTS` into RLS-filtered `sales`) | ← same | ← same | ← same | no DML grants; snapshot columns (`name/sku/price`) until the products slice adds server re-pricing |
+| `invoice_counters` | ✗ | ✗ | ✗ | ✗ | internal per-business sequence, locked inside `create_sale`; no grants, no policies |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -76,6 +79,8 @@ in `src/lib/supabase/admin.ts`).
 | `spend_points` | manager+ | same membership/store guards; stores points negative; refuses to overdraw (`insufficient_points`) | `points.redeemed` |
 | `adjust_points` | owner (or platform `super_admin`) | non-zero signed points; **reason mandatory**; may not push balance negative; corrections are appended, never edits | `points.adjusted` |
 | `point_balance` | anyone who may SELECT the cache | SECURITY INVOKER — RLS decides; 0 when nothing earned yet | — |
+| `create_sale` | staff+ of the store's business | store-scoped staff confined to their stores; member must be active & in-business; items/payments validated and **totals computed server-side**; payments must equal total exactly; per-business sequential invoices under a locked counter; idempotency-key replay returns the stored sale; member sales post a `sale`-sourced ledger earn (launch policy ₹100→10 pts, floor on paise) | `sale.created` (+ `points.awarded` via ledger) |
+| `void_sale` | manager+ | reason required; only `completed` sales; never deletes — flips status and **reverses points with a compensating `adjust` entry** (idempotent on `sale-void:<id>`) | `sale.voided` (+ `points.adjusted`) |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
@@ -88,9 +93,9 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **52 cases, 52 passed** (Step 2 suite executed 2026-09-05;
-ledger suite 2026-09-06, against PostgreSQL 18.4 with the real migrations + seed; see
-`RLS_TEST_RESULTS.md` for both logs):
+`scripts/rls-check/10_assertions.sql` — **61 cases, 61 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales suites 2026-09-06, against PostgreSQL 18.4 with the real migrations + seed; see
+`RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
   cross-tenant FK-consistency trigger, uniqueness constraints, one-pending-invite rule, invitation
@@ -107,6 +112,14 @@ ledger suite 2026-09-06, against PostgreSQL 18.4 with the real migrations + seed
   member removal / store assignment with audit rows; `complete_business_signup` creates a tenant
   once and is idempotent.
 - **V1** service_role bypass for trusted server operations.
+- **SA1–SA9** sales: member sale keeps totals/points/invoice/payment/ledger/cache/audit in sync
+  (₹1,250 → 125 pts); walk-ins earn nothing; customers, other tenants and store-scoped staff
+  refused (42501) while scoped staff may sell at their own store; payment mismatch / bad method /
+  zero qty / over-subtotal discount / empty cart refused (22023) with nothing persisted;
+  idempotency-key replay returns the stored sale without double-posting; invoice counters are
+  sequential per business and independent per tenant; void is manager+, reason-required, reverses
+  points via a compensating adjust entry and is final; customers see only their own sales (items
+  follow the parent), never cross-tenant; no DML grants — even owners cannot insert sales directly.
 - **L1–L10** points ledger: staff award with cache/balance/audit in sync; customers and
   other-tenant owners denied (42501); store-scoped staff confined to their stores; idempotency-key
   replay never double-posts; manager-only spends stored negative with lifetimes updated; overspend
@@ -115,7 +128,7 @@ ledger suite 2026-09-06, against PostgreSQL 18.4 with the real migrations + seed
   for postgres); RLS visibility own-memberships / whole-business / never cross-tenant; insert
   guards reject business-mismatched, foreign-store and blocked-membership entries.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 69 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 87 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. It could not be executed in the build sandbox (no Docker);
 the plain-SQL harness proves identical boundaries on stock PostgreSQL.
 
@@ -133,5 +146,11 @@ the plain-SQL harness proves identical boundaries on stock PostgreSQL.
   the loyalty rule engine (`loyalty_rules`/`rule_versions`/`rule_sets`) arrive with their own
   slices; `rule_set_id` and reward tables were deliberately not pre-created here.
 - Ledger `expires_on` exists but is unused: the launch policy is **no points expiry** (spec §2.5).
+- Sales slice deviations from proposal §8.1 (documented in the migration header): line prices are
+  POS-supplied **snapshots** until the products/inventory slice adds server re-pricing and stock
+  validation; points come from `businesses.earn_spend_paise/earn_points` (launch policy) instead
+  of published `loyalty_rule_sets`; idempotency lives on the sale row (unique business+key)
+  instead of a generic `idempotency_keys` table — same replay guarantee, less machinery.
+  `sale_items.points_awarded` stays 0 until per-line rule pricing exists.
 - `actor_profile_id` on the ledger is FK-free on purpose (audit_logs precedent): deleting a staff
   auth user must never be blocked by — or silently rewrite — financial history.
