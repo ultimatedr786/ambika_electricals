@@ -65,7 +65,7 @@ export function SignupForm() {
       <motion.div
         initial={{ opacity: 0, scale: 0.97 }}
         animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+        transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
         className="rounded-2xl border bg-card p-7 text-center shadow-sm"
       >
         <motion.div
@@ -82,7 +82,7 @@ export function SignupForm() {
         <div className="mt-5 grid grid-cols-2 gap-3">
           <div className="rounded-xl border bg-muted/40 p-3.5">
             <p className="text-xs text-muted-foreground">Welcome points</p>
-            <p className="mt-0.5 text-lg font-semibold tabular">{formatNumber(100)}</p>
+            <p className="mt-0.5 text-lg font-semibold tabular text-primary">{formatNumber(100)}</p>
           </div>
           <div className="rounded-xl border bg-muted/40 p-3.5">
             <p className="text-xs text-muted-foreground">Membership ID</p>
@@ -91,7 +91,7 @@ export function SignupForm() {
         </div>
 
         <Button size="lg" className="mt-5 w-full" onClick={() => router.push("/onboarding")}>
-          <Sparkles /> Explore Rewards
+          <Sparkles className="mr-1.5 size-4" /> Explore Rewards
         </Button>
         <Button variant="ghost" size="sm" className="mt-2 w-full" onClick={() => router.push("/customer/dashboard")}>
           Skip to dashboard
@@ -165,7 +165,7 @@ export function SignupForm() {
         loading={form.formState.isSubmitting}
         disabled={passwordScore(password) < 4 || !form.watch("terms")}
       >
-        Create Account <ArrowRight />
+        Create Account <ArrowRight className="ml-1 size-4" />
       </Button>
 
       <p className="text-center text-sm text-muted-foreground">

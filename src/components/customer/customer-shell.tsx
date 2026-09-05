@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import {
-  Bell, CreditCard, Gift, Heart, Home, LogOut, Receipt, Settings, ShoppingBag,
+  CreditCard, Gift, Heart, Home, LogOut, Receipt, Settings, ShoppingBag,
   Sparkles, Trophy, UserRound, Users, Wallet,
 } from "lucide-react";
 import { Logo } from "@/components/shared/logo";
@@ -19,7 +19,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { DemoSwitcher } from "@/components/shared/demo-switcher";
-import { useCurrentCustomer, useStore } from "@/lib/store";
+import { NotificationCenter } from "@/components/shared/notification-center";
+import { useCurrentCustomer } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { cn, formatNumber, initials } from "@/lib/utils";
 
@@ -47,11 +48,9 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const customer = useCurrentCustomer();
-  const { state } = useStore();
   const { authService, cartService } = useServices();
   const [signOutOpen, setSignOutOpen] = React.useState(false);
 
-  const unread = state.customerNotifications.filter((n) => !n.read).length;
   const cartCount = cartService.count;
 
   const isActive = (href: string) =>
@@ -126,14 +125,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
                 )}
               </Link>
             </Button>
-            <Button asChild variant="ghost" size="icon-sm" className="relative" aria-label={`Notifications, ${unread} unread`}>
-              <Link href="/customer/notifications">
-                <Bell className="size-[18px]" />
-                {unread > 0 && (
-                  <span className="absolute right-1 top-1 size-2 rounded-full bg-destructive ring-2 ring-background" />
-                )}
-              </Link>
-            </Button>
+            <NotificationCenter scope="customer" />
             <ThemeToggle />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -153,7 +145,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
                 <DropdownMenuItem asChild><Link href="/customer/membership"><CreditCard /> Membership</Link></DropdownMenuItem>
                 <DropdownMenuItem asChild><Link href="/customer/activity"><Wallet /> Points</Link></DropdownMenuItem>
                 <DropdownMenuItem asChild><Link href="/customer/redemptions"><ShoppingBag /> Redemptions</Link></DropdownMenuItem>
-                <DropdownMenuItem asChild><Link href="/customer/notifications"><Bell /> Notifications</Link></DropdownMenuItem>
+                <DropdownMenuItem asChild><Link href="/customer/notifications"><Receipt /> Notifications</Link></DropdownMenuItem>
                 <DropdownMenuItem asChild><Link href="/customer/profile"><Settings /> Settings</Link></DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild><Link href="/business/dashboard"><Sparkles /> Switch to business</Link></DropdownMenuItem>

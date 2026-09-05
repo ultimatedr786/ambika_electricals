@@ -13,6 +13,7 @@ import { rewardRules as seedRules } from "@/lib/mock-data/rules";
 import { stores as seedStores } from "@/lib/mock-data/stores";
 import { staff as seedStaff } from "@/lib/mock-data/staff";
 import { customerNotifications, businessNotifications } from "@/lib/mock-data/notifications";
+import { eventBus } from "@/lib/events";
 import type {
   Address, AppNotification, Campaign, CartLine, Challenge, Customer, DemoRole, PointTransaction,
   Product, Redemption, Reward, RewardRule, Sale, StaffMember, Store,
@@ -100,6 +101,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const reset = React.useCallback(() => {
     window.sessionStorage.removeItem(KEY);
     setState(initialState);
+    eventBus.emit("store.reset", undefined);
   }, []);
 
   const value = React.useMemo(() => ({ state, setState, hydrated, reset }), [state, hydrated, reset]);

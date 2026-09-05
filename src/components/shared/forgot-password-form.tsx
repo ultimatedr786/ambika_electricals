@@ -10,10 +10,9 @@ import { ArrowLeft, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { sleep } from "@/lib/utils";
 
 const schema = z.object({
-  identifier: z.string().min(5, "Enter your email address or mobile number"),
+  identifier: z.string().min(3, "Enter your email address or mobile number"),
 });
 type Values = z.infer<typeof schema>;
 
@@ -21,8 +20,7 @@ export function ForgotPasswordForm() {
   const [sent, setSent] = React.useState<string | null>(null);
   const form = useForm<Values>({ resolver: zodResolver(schema), defaultValues: { identifier: "" } });
 
-  const onSubmit = form.handleSubmit(async (values) => {
-    await sleep(850);
+  const onSubmit = form.handleSubmit((values) => {
     setSent(values.identifier);
   });
 
@@ -31,6 +29,7 @@ export function ForgotPasswordForm() {
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2 }}
         className="rounded-2xl border bg-card p-7 text-center shadow-sm"
       >
         <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
@@ -71,7 +70,7 @@ export function ForgotPasswordForm() {
         Send Reset Link
       </Button>
       <Button asChild variant="ghost" size="lg" className="w-full">
-        <Link href="/login"><ArrowLeft /> Back to Login</Link>
+        <Link href="/login"><ArrowLeft className="mr-1.5 size-4" /> Back to Login</Link>
       </Button>
     </form>
   );

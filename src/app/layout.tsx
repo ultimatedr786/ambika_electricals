@@ -11,19 +11,30 @@ export const metadata: Metadata = {
     "Earn reward points on every electrical purchase at Ambika Electricals — LED lighting, switches, wires, MCBs, fans and accessories. Redeem points for products, discounts and member offers.",
   applicationName: "Ambika Electricals Rewards",
   manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Rewardly",
+  },
+  formatDetection: {
+    telephone: false,
+  },
   openGraph: {
     title: "Ambika Electricals Rewards",
     description: "A loyalty and rewards programme built for an electrical retailer.",
     siteName: "Ambika Electricals Rewards",
     type: "website",
   },
-  icons: { icon: "/icon.svg" },
+  icons: {
+    icon: "/icon.svg",
+    apple: "/icons/apple-touch-icon.png",
+  },
 };
 
 export const viewport: Viewport = {
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#0a0f1a" },
+    { media: "(prefers-color-scheme: dark)", color: "#070d18" },
   ],
   width: "device-width",
   initialScale: 1,
@@ -33,15 +44,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-          rel="stylesheet"
-        />
-      </head>
-      <body className="font-sans">
+      <body className="font-sans antialiased">
         <Providers>{children}</Providers>
       </body>
     </html>
