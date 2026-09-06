@@ -2820,3 +2820,301 @@ begin
   end;
   execute 'reset role';
 end $$;
+
+-- ============================================================================
+-- MVP LAUNCH PART A §3 — secure membership QR tokens + POS verification
+-- ============================================================================
+
+-- CASE: QR1 issue — customer mints an opaque token; no PII/membership id encoded; previous token revoked
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+do $$
+declare
+  v_res jsonb; v_token text; v_selector text; v_secret text; v_revoked integer; v_row record;
+begin
+  v_res := public.issue_membership_qr_token();
+  v_token := v_res ->> 'token';
+
+  if v_token !~ '^RWD1\.[0-9A-HJKMNP-TV-Z]{16}\.[0-9A-HJKMNP-TV-Z]{26}$' then
+    raise exception 'ASSERT: unexpected token shape %', v_token;
+  end if;
+  -- No membership number, name, phone or points anywhere in the payload.
+  if v_token like '%AE-DEVRAHUL1%' or upper(v_token) like '%RAHUL%' or v_token like '%11248%' then
+    raise exception 'ASSERT: QR payload leaks membership data';
+  end if;
+  if (v_res ->> 'ttl_seconds')::int > 300 then
+    raise exception 'ASSERT: ttl above the 5 minute hard cap';
+  end if;
+  if (v_res ->> 'expires_at')::timestamptz > now() + interval '5 minutes' then
+    raise exception 'ASSERT: expiry beyond the hard cap';
+  end if;
+
+  v_selector := split_part(v_token, '.', 2);
+  v_secret   := split_part(v_token, '.', 3);
+
+  -- The customer cannot read the token table at all (no SELECT grant).
+  begin
+    perform 1 from public.membership_qr_tokens where selector = v_selector;
+    raise exception 'ASSERT: authenticated could read membership_qr_tokens';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Inspect as the database owner: the secret must never be persisted.
+  set local role postgres;
+  select * into v_row from public.membership_qr_tokens where selector = v_selector;
+  if v_row.id is null then raise exception 'ASSERT: token row missing'; end if;
+  if encode(v_row.verifier_hash, 'escape') like '%' || v_secret || '%' then
+    raise exception 'ASSERT: secret stored in the token row';
+  end if;
+  if v_row.verifier_hash
+     is distinct from extensions.digest(v_row.salt || convert_to(v_secret, 'UTF8'), 'sha256') then
+    raise exception 'ASSERT: stored hash does not verify the issued secret';
+  end if;
+  set local role authenticated;
+
+  -- Issuing again supersedes the live token (one QR at a time).
+  perform public.issue_membership_qr_token();
+  set local role postgres;
+  select count(*) into v_revoked from public.membership_qr_tokens
+   where selector = v_selector and revoked_at is not null and revoke_reason = 'superseded';
+  if v_revoked <> 1 then raise exception 'ASSERT: previous token was not superseded'; end if;
+end $$;
+
+-- CASE: QR2 verify — authorized staff scan succeeds, returns minimum data, is single-use and audited
+set local role authenticated;
+do $$
+declare v_token text; v_res jsonb; v_selector text; v_audit integer;
+begin
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  v_token := public.issue_membership_qr_token() ->> 'token';
+  v_selector := split_part(v_token, '.', 2);
+
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000001');
+
+  if (v_res ->> 'ok')::boolean is not true then
+    raise exception 'ASSERT: authorized scan failed: %', v_res;
+  end if;
+  if v_res ->> 'membership_no' <> 'AE-DEVRAHUL1' then
+    raise exception 'ASSERT: wrong membership resolved: %', v_res;
+  end if;
+  if (v_res ->> 'points_balance') is null then raise exception 'ASSERT: no balance returned'; end if;
+  -- Minimum data only — no email, no raw phone, no enrollment payload.
+  if v_res ? 'email' or v_res ? 'phone' or v_res ? 'enrollment_data' then
+    raise exception 'ASSERT: verification returned more than the minimum data: %', v_res;
+  end if;
+
+  -- Replay of the same code is refused (single use).
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000001');
+  if v_res ->> 'reason' <> 'qr_already_used' then
+    raise exception 'ASSERT: consumed token was accepted twice: %', v_res;
+  end if;
+
+  -- Audited, without any secret material.
+  set local role postgres;
+  select count(*) into v_audit from public.audit_logs
+   where action = 'membership_qr.verified' and metadata ->> 'selector' = v_selector;
+  if v_audit <> 1 then raise exception 'ASSERT: verification not audited'; end if;
+  if exists (
+    select 1 from public.audit_logs
+     where action like 'membership_qr%'
+       and metadata::text like '%' || split_part(v_token, '.', 3) || '%'
+  ) then
+    raise exception 'ASSERT: audit log contains the token secret';
+  end if;
+  set local role authenticated;
+end $$;
+
+-- CASE: QR3 verify — malformed, unknown and tampered tokens all fail identically and are recorded
+set local role authenticated;
+do $$
+declare v_token text; v_tampered text; v_fail integer; v_res jsonb;
+begin
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  v_token := public.issue_membership_qr_token() ->> 'token';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  v_res := public.verify_membership_qr_token('not-a-token', null);
+  if v_res ->> 'reason' <> 'qr_invalid' then raise exception 'ASSERT: malformed token: %', v_res; end if;
+
+  v_res := public.verify_membership_qr_token('RWD1.ZZZZZZZZZZZZZZZZ.ZZZZZZZZZZZZZZZZZZZZZZZZZZ', null);
+  if v_res ->> 'reason' <> 'qr_invalid' then raise exception 'ASSERT: unknown selector: %', v_res; end if;
+
+  -- Same selector, mutated secret → signature mismatch, same opaque reason.
+  v_tampered := 'RWD1.' || split_part(v_token, '.', 2) || '.' ||
+                translate(split_part(v_token, '.', 3), '0123456789', '1234567890');
+  v_res := public.verify_membership_qr_token(v_tampered, null);
+  if v_res ->> 'reason' <> 'qr_invalid' then raise exception 'ASSERT: tampered secret: %', v_res; end if;
+
+  set local role postgres;
+  select count(*) into v_fail from public.qr_verification_attempts
+   where actor_id = '33333333-3333-4333-8333-333333333333' and outcome = 'invalid';
+  if v_fail < 3 then raise exception 'ASSERT: failed attempts not recorded (got %)', v_fail; end if;
+  set local role authenticated;
+
+  -- The genuine token still works afterwards (failures do not burn it).
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000001');
+  if (v_res ->> 'ok')::boolean is not true then
+    raise exception 'ASSERT: genuine token rejected after failed attempts: %', v_res;
+  end if;
+end $$;
+
+-- CASE: QR4 verify — expiry is enforced
+set local role authenticated;
+do $$
+declare v_token text; v_selector text; v_res jsonb;
+begin
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  v_token := public.issue_membership_qr_token(null, 30) ->> 'token';
+  v_selector := split_part(v_token, '.', 2);
+
+  -- Fast-forward the clock by ageing the row (service-role style maintenance).
+  set local role postgres;
+  update public.membership_qr_tokens
+     set issued_at = now() - interval '4 minutes', expires_at = now() - interval '1 second'
+   where selector = v_selector;
+  set local role authenticated;
+
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000001');
+  if v_res ->> 'reason' <> 'qr_expired' then raise exception 'ASSERT: expired token: %', v_res; end if;
+end $$;
+
+-- CASE: QR5 verify — cross-business staff and customers cannot verify; store scoping enforced
+set local role authenticated;
+do $$
+declare v_token text; v_res jsonb; v_consumed timestamptz;
+begin
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  v_token := public.issue_membership_qr_token() ->> 'token';
+
+  -- Other tenant's owner: no role in the issuing business.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, null);
+  if v_res ->> 'reason' <> 'not_authorized' then raise exception 'ASSERT: cross-tenant: %', v_res; end if;
+  -- The denial must not reveal the customer.
+  if v_res ? 'membership_no' or v_res ? 'display_name' then
+    raise exception 'ASSERT: denial leaked customer data: %', v_res;
+  end if;
+
+  -- Another customer (no business role at all).
+  perform set_config('request.jwt.claims', '{"sub":"66666666-6666-4666-8666-666666666666","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, null);
+  if v_res ->> 'reason' <> 'not_authorized' then raise exception 'ASSERT: customer verify: %', v_res; end if;
+
+  -- Store-scoped cashier at the WRONG store.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000002');
+  if v_res ->> 'reason' <> 'store_forbidden' then raise exception 'ASSERT: store scope: %', v_res; end if;
+
+  -- A store belonging to the other tenant.
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000009');
+  if v_res ->> 'reason' <> 'store_not_in_business' then raise exception 'ASSERT: foreign store: %', v_res; end if;
+
+  -- The token is still unconsumed after all denials.
+  set local role postgres;
+  select consumed_at into v_consumed from public.membership_qr_tokens
+   where selector = split_part(v_token, '.', 2);
+  if v_consumed is not null then raise exception 'ASSERT: denied attempts consumed the token'; end if;
+  set local role authenticated;
+end $$;
+
+-- CASE: QR6 revocation + rate limits
+set local role authenticated;
+do $$
+declare v_token text; v_n integer; i integer; v_res jsonb; v_limited boolean := false;
+begin
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  v_token := public.issue_membership_qr_token() ->> 'token';
+  v_n := public.revoke_membership_qr_tokens('lost_device');
+  if v_n <> 1 then raise exception 'ASSERT: revoke did not affect the live token (got %)', v_n; end if;
+
+  -- Revocation is audited per business, tenant-scoped and selector-free.
+  set local role postgres;
+  if not exists (
+    select 1 from public.audit_logs
+     where action = 'membership_qr.revoked'
+       and business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+       and metadata ->> 'reason' = 'lost_device'
+       and (metadata ->> 'tokens')::int = 1
+  ) then
+    raise exception 'ASSERT: revocation not audited';
+  end if;
+  set local role authenticated;
+
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000001');
+  if v_res ->> 'reason' <> 'qr_revoked' then raise exception 'ASSERT: revoked token: %', v_res; end if;
+
+  -- Issue rate limit: 10 per minute per membership.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    for i in 1 .. 12 loop
+      perform public.issue_membership_qr_token();
+    end loop;
+  exception when others then
+    if sqlerrm like 'rate_limited%' then v_limited := true; else raise; end if;
+  end;
+  if not v_limited then raise exception 'ASSERT: issue rate limit never triggered'; end if;
+end $$;
+
+-- CASE: QR7 no DML grants and no SELECT on the token table; scan RPC is authenticated-only
+do $$
+declare v_ok boolean;
+begin
+  if has_table_privilege('authenticated', 'public.membership_qr_tokens', 'SELECT') then
+    raise exception 'ASSERT: authenticated can read membership_qr_tokens';
+  end if;
+  foreach v_ok in array array[
+    has_table_privilege('authenticated', 'public.membership_qr_tokens', 'INSERT'),
+    has_table_privilege('authenticated', 'public.membership_qr_tokens', 'UPDATE'),
+    has_table_privilege('authenticated', 'public.membership_qr_tokens', 'DELETE'),
+    has_table_privilege('authenticated', 'public.qr_verification_attempts', 'INSERT'),
+    has_table_privilege('authenticated', 'public.qr_verification_attempts', 'UPDATE'),
+    has_table_privilege('anon', 'public.qr_verification_attempts', 'SELECT')
+  ] loop
+    if v_ok then raise exception 'ASSERT: unexpected DML/anon grant on the QR tables'; end if;
+  end loop;
+  if has_function_privilege('anon', 'public.verify_membership_qr_token(text, uuid)', 'EXECUTE') then
+    raise exception 'ASSERT: anon can execute verify_membership_qr_token';
+  end if;
+  if has_function_privilege('anon', 'public.issue_membership_qr_token(uuid, integer)', 'EXECUTE') then
+    raise exception 'ASSERT: anon can execute issue_membership_qr_token';
+  end if;
+end $$;
+
+-- CASE: QR8 attempts are append-only, manager-visible and staff-invisible
+set local role authenticated;
+do $$
+declare v_seen integer;
+begin
+  -- A customer scanning produces a recorded denial (persisted, not rolled back).
+  perform set_config('request.jwt.claims', '{"sub":"66666666-6666-4666-8666-666666666666","role":"authenticated"}', true);
+  perform public.verify_membership_qr_token('RWD1.ZZZZZZZZZZZZZZZZ.ZZZZZZZZZZZZZZZZZZZZZZZZZZ', null);
+
+  set local role postgres;
+  if not exists (select 1 from public.qr_verification_attempts where outcome = 'invalid') then
+    raise exception 'ASSERT: attempt row missing';
+  end if;
+  begin
+    update public.qr_verification_attempts set outcome = 'verified' where true;
+    raise exception 'ASSERT: attempts table is mutable';
+  exception when others then
+    if sqlerrm not like 'qr_verification_attempts are append-only%' then raise; end if;
+  end;
+  set local role authenticated;
+
+  -- Manager can review the business trail; a store cashier cannot.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  perform public.issue_membership_qr_token();
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  perform public.verify_membership_qr_token('RWD1.YYYYYYYYYYYYYYYY.YYYYYYYYYYYYYYYYYYYYYYYYYY', null);
+
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select count(*) into v_seen from public.qr_verification_attempts;
+  if v_seen = 0 then raise exception 'ASSERT: manager cannot review scan attempts'; end if;
+
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_seen from public.qr_verification_attempts;
+  if v_seen <> 0 then raise exception 'ASSERT: staff can read scan attempts (%)', v_seen; end if;
+end $$;

@@ -449,3 +449,71 @@ Note on RE4/RE6: reservations are pinned — `redemptions.inventory_scope` recor
 collect/cancel debit or release exactly that row. RE4 proves the last-unit race, the pool
 fallback and the unlimited path; RE6 proves the debit (on_hand 2 → 1, reserved 1 → 0) and the
 expired-hold release.
+
+## Run 6 — Step 3 Slice 5: secure membership QR + POS verification (86 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**8 files**, incl.
+`20260906160000_membership_qr_tokens.sql`) → supabase/seed.sql → **86 assertion cases**
+(S/A/W/R/V + L + SA + INV + RE + new **QR1–QR8**).
+
+```
+RLS check · server postgres://postgres:***@127.0.0.1:54329/postgres · throwaway db "rewardly_test"
+APPLIED stubs (13ms)
+APPLIED 20260905120000_auth_foundation_schema.sql (31ms)
+APPLIED 20260905120100_invitations_and_rpcs.sql (15ms)
+APPLIED 20260905120200_rls_policies.sql (19ms)
+APPLIED 20260906120000_points_ledger.sql (20ms)
+APPLIED 20260906130000_sales.sql (27ms)
+APPLIED 20260906140000_inventory.sql (27ms)
+APPLIED 20260906150000_rewards_redemptions.sql (32ms)
+APPLIED 20260906160000_membership_qr_tokens.sql (19ms)
+APPLIED seed.sql (27ms)
+… (78 earlier cases unchanged — see Runs 1–5) …
+PASS  QR1 issue — customer mints an opaque token; no PII/membership id encoded; previous token revoked
+PASS  QR2 verify — authorized staff scan succeeds, returns minimum data, is single-use and audited
+PASS  QR3 verify — malformed, unknown and tampered tokens all fail identically and are recorded
+PASS  QR4 verify — expiry is enforced
+PASS  QR5 verify — cross-business staff and customers cannot verify; store scoping enforced
+PASS  QR6 revocation + rate limits
+PASS  QR7 no DML grants and no SELECT on the token table; scan RPC is authenticated-only
+PASS  QR8 attempts are append-only, manager-visible and staff-invisible
+
+86/86 RLS cases passed.
+```
+
+pgTAP mirror grew from 155 to **185 assertions** (30 QR assertions). Docker is still unavailable in
+the sandbox, so it ran through `scripts/rls-check/pgtap-run.mjs`:
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 185 ok, 0 not ok — PASSED
+```
+
+The stub runner gained a `matches(text, regex, descr)` implementation (the QR series asserts the
+token's wire format with a regular expression); the real pgTAP extension has provided `matches()`
+since forever, so nothing changes for `supabase test db`.
+
+### What the QR series actually proves
+
+| Case | Property under test |
+| --- | --- |
+| QR1 | Payload shape `RWD1.<16>.<26>`; no membership number / name / points anywhere in it; TTL clamped to the 5-minute cap; only `sha256(salt‖secret)` persisted (recomputed from the issued secret in the test); the token table is unreadable even to the issuing customer's session; re-issuing marks the previous row `superseded`. |
+| QR2 | An authorized, store-assigned cashier resolves the right member; the response carries counter-safe fields only (no email/phone/enrolment payload); the scan is audited **by selector**; the secret provably appears nowhere in `audit_logs`; replaying the same code returns `qr_already_used`. |
+| QR3 | Malformed input, an unknown selector and a tampered secret all return the identical `qr_invalid`; all three land in `qr_verification_attempts`; the genuine token still verifies afterwards — failures never burn it. |
+| QR4 | An aged row is refused with `qr_expired`. |
+| QR5 | Authorization precedes lifecycle: a foreign tenant's owner and a plain customer both get `not_authorized` (with no customer fields in the reply); a store-scoped cashier gets `store_forbidden` at an unassigned store and `store_not_in_business` for another tenant's store; **no denial consumes the token**. |
+| QR6 | "Hide my QR" revokes the live token (`qr_revoked` at the counter) and writes a per-business audit row carrying the token count and reason but no selector; the 10-issues-per-minute limit trips. |
+| QR7 | Grants: `authenticated` has no SELECT/INSERT/UPDATE/DELETE on `membership_qr_tokens`, no INSERT/UPDATE on `qr_verification_attempts`, `anon` has neither SELECT nor EXECUTE on issue/verify. |
+| QR8 | Attempts are append-only (the trigger refuses even `postgres`), managers can review their business's trail, cashiers see zero rows. |
+
+### Design change forced by the tests
+
+`verify_membership_qr_token` originally raised on every failure. QR3/QR8 failed with "attempts not
+recorded": a `raise` rolls back the statement, taking the `qr_verification_attempts` row and the
+`write_audit` row with it — which would have defeated both the security trail **and** the scanner
+rate limit that reads from it. The function now **returns** `{ok:false, reason:'<code>'}` for every
+verification failure and raises only `authentication_required` (28000). This is the same lesson the
+rewards slice learned with lazy expiry, now stated as a rule in RLS_POLICIES §4: *an RPC that must
+leave evidence cannot raise.*

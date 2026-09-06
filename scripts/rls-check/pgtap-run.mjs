@@ -3,7 +3,7 @@
 // The CANONICAL runner is `supabase test db` (real pgTAP, needs Docker). Where
 // Docker is unavailable this script executes the same test file against the
 // throwaway harness database (stubs → migrations → seed) with minimal stubs
-// for the pgTAP subset the file uses (plan/is/ok/lives_ok/throws_ok/finish).
+// for the pgTAP subset the file uses (plan/is/ok/matches/lives_ok/throws_ok/finish).
 // Stub semantics: is() compares ::text with IS NOT DISTINCT FROM; failures are
 // reported as `not ok N` WARNING lines; finish() raises when run<>plan or any
 // failure occurred. Usage: node scripts/rls-check/pgtap-run.mjs
@@ -72,6 +72,15 @@ end $$;
 create or replace function extensions.ok(cond boolean, descr text)
 returns text language plpgsql as $$
 begin return extensions._tap_report(coalesce(cond,false), descr); end $$;
+create or replace function extensions.matches(a text, p_regex text, descr text)
+returns text language plpgsql as $$
+begin
+  if a ~ p_regex then
+    return extensions._tap_report(true, descr);
+  end if;
+  return extensions._tap_report(false, descr,
+    'got [' || coalesce(a, 'NULL') || '] does not match [' || p_regex || ']');
+end $$;
 create or replace function extensions.lives_ok(stmt text, descr text)
 returns text language plpgsql as $$
 begin

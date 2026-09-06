@@ -6,6 +6,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { MembershipCard, ShowQRSheet } from "@/components/customer/membership-qr";
+import { LiveMembershipQr } from "@/components/customer/live-membership-qr";
 import { TierBadge } from "@/components/shared/tier-badge";
 import { useCurrentCustomer } from "@/lib/store";
 import { tiers } from "@/lib/mock-data/business";
@@ -22,6 +23,7 @@ export default function MembershipPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-4">
+          <LiveMembershipQr />
           <MembershipCard customer={customer} />
           <ShowQRSheet customer={customer} />
         </div>

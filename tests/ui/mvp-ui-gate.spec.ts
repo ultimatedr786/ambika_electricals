@@ -319,9 +319,11 @@ test.describe("Gate 5 — collapsible sidebar", () => {
     await gotoApp(page, BUSINESS_HOME);
     const mainPadding = () => page.locator("main").evaluate((el) => getComputedStyle(el).paddingLeft);
 
-    expect(await mainPadding()).toBe("248px");
+    // Poll: the padding follows a CSS variable, so the computed value can land
+    // a frame after the class flips.
+    await expect.poll(mainPadding).toBe("248px");
     await page.getByRole("button", { name: /collapse sidebar/i }).click();
-    expect(await mainPadding()).toBe("72px");
+    await expect.poll(mainPadding).toBe("72px");
   });
 
   test("customer desktop sidebar collapses too", async ({ page }) => {

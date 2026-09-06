@@ -57,6 +57,8 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `redemptions` SELECT | **own redemptions only** | whole business | whole business | whole business | writes RPC-only (`redeem_reward`/`collect_redemption`/`cancel_redemption`); lifecycle status flips — never deleted; collection codes stored **sha256 + last4 only** (§8.4) |
 | `redemption_items` SELECT | follows parent redemption (`EXISTS` into RLS-filtered `redemptions`) | ← same | ← same | ← same | reward name/points snapshot at redeem time |
 | `redemption_counters` | ✗ | ✗ | ✗ | ✗ | internal per-business `RDM-####` sequence, locked inside `redeem_reward`; no grants, no policies |
+| `membership_qr_tokens` | ✗ | ✗ | ✗ | ✗ | **no SELECT for anyone but `service_role`** — the row holds the salted sha256 verifier of a live checkout code; issue/verify/revoke happen entirely inside the definer RPCs |
+| `qr_verification_attempts` SELECT | ✗ | ✗ | whole business | whole business | security trail of every scan (success and failure). Append-only: no DML grants **and** a trigger that rejects UPDATE/DELETE even for postgres. Deliberately invisible to cashiers so the trail cannot be shoulder-audited at the counter |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -102,11 +104,22 @@ in `src/lib/supabase/admin.ts`).
 | `redeem_reward` | the member themself **or** staff+ | store-scoped staff confined to their stores; rolling-30-day limit; reserves the exact inventory row (store → pool → unlimited) and records `inventory_scope`; points spent through a `redeem` ledger entry (idempotent on `redemption:<id>`); the plaintext code is returned **once** (replays carry `code: null`); lock order *balance → inventory → counter* | `redemption.created` |
 | `collect_redemption` | staff+ | Crockford-normalizes the code (I/L/O → 1/1/0) then sha256-matches; lazy expiry marks + releases + audits and then **returns** `expired` (a raise would roll the marking back); debits exactly the reserved row | `redemption.collected` (+ `redemption.expired`) |
 | `cancel_redemption` | manager+ **or** the member themself | **reason required**; pending only; refunds with a compensating `adjust` entry (idempotent on `redemption-cancel:<id>`); releases the hold from exactly the reserved row; lazy expiry as in collect | `redemption.cancelled` (+ `redemption.expired`) |
+| `issue_membership_qr_token` | the signed-in customer | resolves the caller's own active membership (never a client-supplied one); TTL clamped 30–300 s (default 90); **10 issues per minute per membership** (`rate_limited`); minting revokes the previous live token (`revoke_reason = superseded`); only `sha256(salt‖secret)` is stored — the secret exists once, in the response | `membership_qr.issued` (selector + TTL only) |
+| `verify_membership_qr_token` | staff+ of the token's business | **authorization first**: business role, then store scoping (`store_not_in_business` / `store_forbidden`) — lifecycle detail is never revealed to someone who may not scan. Then constant-shape checks: malformed / unknown selector / wrong secret all return the same `qr_invalid`. Single use via a conditional `UPDATE … where consumed_at is null and revoked_at is null`, so concurrent scans cannot both win. **40 verifies per minute per staff profile.** Returns `{ok:false, reason}` instead of raising — see note below | `membership_qr.verified` / `membership_qr.verify_denied` / `membership_qr.verify_failed` / `membership_qr.rate_limited` + a `qr_verification_attempts` row on **every** branch |
+| `revoke_membership_qr_tokens` | the signed-in customer | "hide my QR" / lost device: revokes every live token of the caller's memberships, returns the count | `membership_qr.revoked` (one row per affected business, token count + reason, no selector) |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
 **server action**, which catches the typed error and writes the audit row through the admin client
 — with the real client IP, which SQL never sees. Accepted/succeeded operations are audited in-SQL.
+
+The QR slice takes the *other* branch of that same rule: `verify_membership_qr_token` must leave a
+security trail **and** feed a rate limiter, and both live in the rows it writes. A raise would roll
+them back, so verification failures **return** `{ok:false, reason}` and only a missing session
+raises (`authentication_required`, 28000). Every branch — invalid, expired, already-used, revoked,
+business mismatch, not authorized, rate limited — inserts a `qr_verification_attempts` row and an
+audit event **keyed by the selector only**; the secret half of the token is never logged, never
+audited and never stored in plaintext.
 
 Invitation expiry is enforced at every accept attempt (`expires_at < now()` ⇒ reject); the stored
 `status` stays `pending` and UIs derive “expired” from `expires_at` — no background sweeper needed
@@ -114,8 +127,8 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **78 cases, 78 passed** (Step 2 suite executed 2026-09-05;
-ledger + sales + inventory + rewards/redemptions suites 2026-09-06, against PostgreSQL 18.4 with
+`scripts/rls-check/10_assertions.sql` — **86 cases, 86 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales + inventory + rewards/redemptions + membership-QR suites 2026-09-06, against PostgreSQL 18.4 with
 the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
@@ -172,12 +185,27 @@ the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
   count pending/collected only, so a cancellation frees the slot; idempotency replays return the
   stored redemption with `code: null`; customers see active rewards + their own redemptions while
   inventory/counters stay staff-internal; no DML grants — even owners write through RPCs only.
+- **QR1–QR8** membership QR: issuance returns an opaque `RWD1.<selector>.<secret>` payload that
+  contains no membership number, name, phone or points, is clamped to the 5-minute hard cap and is
+  stored only as `sha256(salt‖secret)` (verified against the issued secret in the test); the token
+  table is unreadable even to its owner's session (42501) and re-issuing supersedes the previous
+  code. An authorized cashier's scan resolves the right member, returns counter-safe fields only
+  (no email/phone/enrolment payload), is audited by selector with the secret provably absent from
+  `audit_logs`, and the same code is refused on replay (`qr_already_used`). Malformed, unknown and
+  tampered payloads all return the identical `qr_invalid` and are recorded as failed attempts —
+  while the genuine token still works afterwards, so failures never burn it. Expiry is enforced;
+  foreign-tenant owners and customers get `not_authorized`, store-scoped cashiers get
+  `store_forbidden` at an unassigned store and `store_not_in_business` for another tenant's store,
+  and **no denial consumes the token**. Customer revocation kills the live code
+  (`qr_revoked`) and the 10-per-minute issue limit trips. Grants: no SELECT/INSERT/UPDATE/DELETE
+  for API roles on either table, no `anon` EXECUTE on issue/verify. Attempts are append-only
+  (trigger refuses even postgres), visible to managers and invisible to cashiers.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 155 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 185 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
 additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
-harness database with stubs for the pgTAP subset it uses (plan/is/ok/lives_ok/throws_ok/finish):
-**155/155 passed** (2026-09-06). That run also surfaced a pre-existing off-by-two `plan()` count
+harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/lives_ok/throws_ok/finish):
+**185/185 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
 (the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices
@@ -221,3 +249,15 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/lives_ok/th
   `reward_inventory` row reserved at redeem time so collect/cancel never guess candidate rows.
   Monthly limits are a rolling-30-day window counting pending/collected only. The customer-facing
   *products* catalogue view is still deferred (customers see rewards, not stock).
+- Membership QR decisions: the payload is a **capability, not an identifier** — a bearer token with
+  a 90-second life and a single use, so a screenshot, a shoulder-surfed photo or a shared chat
+  message is worthless within seconds. Selector/secret split (rather than a signed JWT) keeps the
+  verification a single indexed lookup, keeps the secret out of the database entirely and makes
+  revocation instant; there is no signing key to rotate or leak. Both halves use Crockford base-32
+  and the RPC normalizes I/L/O the way `collect_redemption` already does, so a code read aloud at
+  the counter still verifies. Deliberately **not** in this slice: real QR image encoding and camera
+  decoding (capture stays simulated per the MVP scope — staff paste or key the code, and manual
+  member lookup remains the fallback), offline/queued verification, and a sweeper for consumed
+  rows (they are small, indexed by `expires_at` and useful evidence; retention lands with the
+  backup/retention document).
+

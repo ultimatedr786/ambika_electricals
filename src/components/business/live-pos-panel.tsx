@@ -3,7 +3,8 @@
 import * as React from "react";
 import { toast } from "sonner";
 import {
-  CheckCircle2, IndianRupee, Package, Plus, Receipt, Search, Sparkles, Store, Trash2, UserPlus, UserRound, X,
+  CheckCircle2, IndianRupee, Package, Plus, Receipt, ScanLine, Search, Sparkles, Store, Trash2, UserPlus,
+  UserRound, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -13,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { createClient } from "@/lib/supabase/client";
+import { LiveQRScanner, type ScannedMember } from "@/components/business/qr-scanner";
 import { isSupabaseConfigured } from "@/lib/auth/env";
 import { formatINR } from "@/lib/utils";
 import {
@@ -39,6 +41,8 @@ interface MemberHit {
   membershipNo: string;
   displayName: string | null;
   phoneMasked: string | null;
+  /** True when the member proved identity with a single-use QR at this counter. */
+  qrVerified?: boolean;
 }
 
 interface CartLine {
@@ -92,6 +96,7 @@ export function LivePosPanel() {
   const [enrolling, setEnrolling] = React.useState(false);
   const [enrollForm, setEnrollForm] = React.useState({ name: "", phone: "" });
   const [enrollBusy, setEnrollBusy] = React.useState(false);
+  const [scannerOpen, setScannerOpen] = React.useState(false);
 
   // Catalogue picker
   const [catQuery, setCatQuery] = React.useState("");
@@ -421,6 +426,11 @@ export function LivePosPanel() {
                     <UserRound className="size-4 text-muted-foreground" aria-hidden />
                     <span className="truncate text-sm font-medium">{customer.displayName ?? "Member"}</span>
                     <Badge variant="outline" className="font-mono text-[10px]">{customer.membershipNo}</Badge>
+                    {customer.qrVerified && (
+                      <Badge variant="outline" className="gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+                        <CheckCircle2 className="size-2.5" aria-hidden /> QR
+                      </Badge>
+                    )}
                     <Button variant="ghost" size="sm" className="ml-auto h-6 px-1.5" aria-label="Clear customer"
                       onClick={() => { setCustomer(null); setQuery(""); }}>
                       <X className="size-3.5" />
@@ -428,6 +438,15 @@ export function LivePosPanel() {
                   </div>
                 ) : (
                   <div className="space-y-1.5">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => setScannerOpen(true)}
+                    >
+                      <ScanLine /> Scan member QR
+                    </Button>
                     <div className="relative">
                       <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
                       <Input
@@ -650,6 +669,24 @@ export function LivePosPanel() {
           </div>
         </div>
       )}
+
+      <LiveQRScanner
+        open={scannerOpen}
+        onOpenChange={setScannerOpen}
+        storeId={storeId}
+        businessId={businessId}
+        onVerified={(m: ScannedMember) => {
+          setCustomer({
+            id: m.customerMembershipId,
+            membershipNo: m.membershipNo,
+            displayName: m.displayName,
+            phoneMasked: m.phoneMasked,
+            qrVerified: !m.manual,
+          });
+          setHits([]);
+          setQuery("");
+        }}
+      />
     </Card>
   );
 }

@@ -11,6 +11,18 @@ import { LogoMark } from "@/components/shared/logo";
 import { formatNumber } from "@/lib/utils";
 import type { Customer } from "@/types";
 
+/**
+ * Prototype card artwork only.
+ *
+ * The demo matrix is seeded with a throwaway string so that even the mock
+ * never renders a customer's membership number as a scannable payload — the
+ * real checkout code is the opaque single-use token issued by
+ * `issue_membership_qr_token` and rendered by <LiveMembershipQr />.
+ */
+function demoSeed(customer: Customer): string {
+  return `RWD1-DEMO-${customer.tier}-${customer.points}`;
+}
+
 export function MembershipCard({ customer }: { customer: Customer }) {
   return (
     <div className="relative overflow-hidden rounded-2xl border bg-gradient-to-br from-slate-900 to-slate-800 p-5 text-white shadow-lg">
@@ -34,7 +46,7 @@ export function MembershipCard({ customer }: { customer: Customer }) {
           <p className="mt-3 text-2xl font-semibold tabular">{formatNumber(customer.points)}<span className="ml-1.5 text-sm font-normal text-white/60">points</span></p>
         </div>
         <div className="size-[76px] shrink-0 rounded-lg bg-white p-1.5">
-          <QRCode value={customer.membershipId} />
+          <QRCode value={demoSeed(customer)} />
         </div>
       </div>
     </div>
@@ -71,7 +83,7 @@ export function ShowQRSheet({
             className="mt-5 rounded-2xl border bg-white p-4 shadow-sm"
           >
             <div className="size-56 sm:size-64">
-              <QRCode value={`AMBIKA|${customer.membershipId}`} size={29} />
+              <QRCode value={demoSeed(customer)} size={29} />
             </div>
           </motion.div>
           <p className="mt-5 text-lg font-semibold">{customer.name}</p>
@@ -81,7 +93,7 @@ export function ShowQRSheet({
             <span className="text-sm tabular text-muted-foreground">{formatNumber(customer.points)} points</span>
           </div>
           <p className="mt-6 max-w-xs text-xs text-muted-foreground">
-            Mock QR for demonstration. No personal or payment information is encoded.
+            Demo artwork only — nothing is encoded. Your real checkout code is single-use, expires in seconds and carries no personal information.
           </p>
         </div>
         </SheetBody>

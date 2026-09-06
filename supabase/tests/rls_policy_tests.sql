@@ -4,7 +4,7 @@
 -- and anywhere PostgreSQL is available without Docker/Supabase CLI). Where
 -- Docker is unavailable, `node scripts/rls-check/pgtap-run.mjs` executes this
 -- same file against the harness database with stubs for the pgTAP subset used
--- here (plan/is/ok/lives_ok/throws_ok/finish).
+-- here (plan/is/ok/matches/lives_ok/throws_ok/finish).
 --
 -- Design note: every pgTAP assertion runs as the postgres role. Identity
 -- switching happens inside helper functions (SET LOCAL role + JWT claims),
@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(155);
+select plan(185);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -1269,6 +1269,235 @@ select is(
      values (''aaaaaaaa-0000-4000-8000-000000000001'')'),
   '42501',
   'RE9: no direct DML on redemptions (RPC-only)'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Membership QR tokens (20260906160000_membership_qr_tokens.sql)
+-- Mirrors cases QR1-QR8 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+-- QR1: issuance shape, opacity and hashed-at-rest storage.
+select set_config('app.qr_tok1',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.issue_membership_qr_token() ->> ''token'''), true);
+select matches(
+  current_setting('app.qr_tok1', true),
+  '^RWD1[.][0-9A-HJKMNP-TV-Z]{16}[.][0-9A-HJKMNP-TV-Z]{26}$',
+  'QR1: token is an opaque versioned selector.secret payload'
+);
+select is(
+  (select count(*) from (select current_setting('app.qr_tok1', true) as t) x
+    where x.t like '%AE-DEVRAHUL1%' or upper(x.t) like '%RAHUL%')::int,
+  0,
+  'QR1: payload carries no membership number or customer name'
+);
+select is(
+  (select count(*) from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok1', true), '.', 2)
+      and verifier_hash = extensions.digest(
+            salt || convert_to(split_part(current_setting('app.qr_tok1', true), '.', 3), 'UTF8'),
+            'sha256'))::int,
+  1,
+  'QR1: only a salted sha256 verifier is persisted'
+);
+select ok(
+  (select expires_at <= now() + interval '5 minutes'
+     from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok1', true), '.', 2)),
+  'QR1: TTL is clamped to the 5 minute hard cap'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.membership_qr_tokens'),
+  '42501',
+  'QR1: customers cannot read the token table'
+);
+
+-- Re-issuing supersedes the previous live token.
+select set_config('app.qr_tok2',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.issue_membership_qr_token() ->> ''token'''), true);
+select is(
+  (select revoke_reason from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok1', true), '.', 2)),
+  'superseded',
+  'QR1: issuing a new QR revokes the previous one'
+);
+
+-- QR2: authorized staff scan.
+select set_config('app.qr_res1',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'')::text',
+      current_setting('app.qr_tok2', true))), true);
+select is(
+  current_setting('app.qr_res1', true)::jsonb ->> 'ok', 'true',
+  'QR2: store-assigned cashier verifies successfully'
+);
+select is(
+  current_setting('app.qr_res1', true)::jsonb ->> 'membership_no', 'AE-DEVRAHUL1',
+  'QR2: verification resolves the right membership'
+);
+select is(
+  (select count(*) from jsonb_object_keys(current_setting('app.qr_res1', true)::jsonb) k
+    where k in ('email', 'phone', 'enrollment_data'))::int,
+  0,
+  'QR2: response is limited to counter-safe fields'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action = 'membership_qr.verified'
+      and metadata ->> 'selector' = split_part(current_setting('app.qr_tok2', true), '.', 2))::int,
+  1,
+  'QR2: successful scan is audited by selector'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action like 'membership_qr%'
+      and metadata::text like '%' || split_part(current_setting('app.qr_tok2', true), '.', 3) || '%')::int,
+  0,
+  'QR2: audit metadata never contains the token secret'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'') ->> ''reason''',
+      current_setting('app.qr_tok2', true))),
+  'qr_already_used',
+  'QR2: tokens are single use'
+);
+
+-- QR3: malformed / unknown / tampered payloads fail identically.
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.verify_membership_qr_token(''not-a-token'', null) ->> ''reason'''),
+  'qr_invalid',
+  'QR3: malformed payload rejected'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.verify_membership_qr_token(
+       ''RWD1.ZZZZZZZZZZZZZZZZ.ZZZZZZZZZZZZZZZZZZZZZZZZZZ'', null) ->> ''reason'''),
+  'qr_invalid',
+  'QR3: unknown selector rejected with the same opaque reason'
+);
+select ok(
+  (select count(*) from public.qr_verification_attempts
+    where actor_id = '33333333-3333-4333-8333-333333333333'
+      and outcome = 'invalid') >= 2,
+  'QR3: failed scans are recorded for the security trail'
+);
+
+-- QR4: expiry.
+select set_config('app.qr_tok3',
+  extensions.text_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    'select public.issue_membership_qr_token(null, 30) ->> ''token'''), true);
+select lives_ok(
+  format('update public.membership_qr_tokens
+             set issued_at = now() - interval ''4 minutes'',
+                 expires_at = now() - interval ''1 second''
+           where selector = %L', split_part(current_setting('app.qr_tok3', true), '.', 2)),
+  'QR4: age the token as the maintenance role'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'') ->> ''reason''',
+      current_setting('app.qr_tok3', true))),
+  'qr_expired',
+  'QR4: expired tokens are refused'
+);
+
+-- QR5: authorization before lifecycle; store scoping.
+select set_config('app.qr_tok4',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.issue_membership_qr_token() ->> ''token'''), true);
+select is(
+  extensions.text_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    format('select public.verify_membership_qr_token(%L, null) ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'not_authorized',
+  'QR5: foreign tenant owner cannot verify'
+);
+select is(
+  extensions.text_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    format('select public.verify_membership_qr_token(%L, null) ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'not_authorized',
+  'QR5: customers cannot act as scanners'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000002'') ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'store_forbidden',
+  'QR5: cashier cannot scan for an unassigned store'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000009'') ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'store_not_in_business',
+  'QR5: a store from another tenant is rejected'
+);
+select is(
+  (select consumed_at from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok4', true), '.', 2)),
+  null::timestamptz,
+  'QR5: denied attempts never consume the token'
+);
+
+-- QR6: customer revocation ("hide my QR").
+select is(
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.revoke_membership_qr_tokens(''lost_device'')::text'),
+  '1',
+  'QR6: revoke clears the live token'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'') ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'qr_revoked',
+  'QR6: revoked tokens are refused at the counter'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action = 'membership_qr.revoked'
+      and business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+      and metadata ->> 'reason' = 'lost_device')::int,
+  1,
+  'QR6: revocation is audited per business, without a selector'
+);
+
+-- QR7: grants.
+select ok(
+  not has_table_privilege('authenticated', 'public.membership_qr_tokens', 'INSERT')
+  and not has_table_privilege('authenticated', 'public.membership_qr_tokens', 'UPDATE')
+  and not has_table_privilege('authenticated', 'public.qr_verification_attempts', 'INSERT'),
+  'QR7: QR tables are RPC-only for API roles'
+);
+select ok(
+  not has_function_privilege('anon', 'public.verify_membership_qr_token(text, uuid)', 'EXECUTE')
+  and not has_function_privilege('anon', 'public.issue_membership_qr_token(uuid, integer)', 'EXECUTE'),
+  'QR7: anonymous callers cannot issue or verify'
+);
+
+-- QR8: attempts are append-only and manager-scoped.
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.qr_verification_attempts set outcome = ''verified'''),
+  '42501',
+  'QR8: verification attempts are append-only'
+);
+select ok(
+  extensions.count_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select count(*) from public.qr_verification_attempts') > 0,
+  'QR8: managers can review the scan trail'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.qr_verification_attempts'),
+  0::bigint,
+  'QR8: cashiers cannot read the scan trail'
 );
 
 select * from finish();
