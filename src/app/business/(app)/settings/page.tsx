@@ -15,6 +15,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { InstallAppAction } from "@/components/shared/install-app-action";
+import { LiveLoyaltyRulePanel } from "@/components/business/live-loyalty-rule-panel";
 import { isDemoDevToolsEnabled } from "@/lib/auth/env";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
@@ -70,6 +71,10 @@ export default function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="loyalty" className="mt-4 space-y-4">
+          {/* Live, versioned rule engine — renders only when Supabase is
+              configured; the prototype card below stays for demo mode. */}
+          <LiveLoyaltyRulePanel />
+
           <Card className="p-5">
             <h2 className="flex items-center gap-2 text-sm font-semibold"><Coins className="size-4 text-muted-foreground" aria-hidden /> Earning &amp; redemption</h2>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -79,7 +84,7 @@ export default function SettingsPage() {
               <div className="rounded-lg border border-dashed p-3">
                 <p className="text-sm font-medium">Points expiry</p>
                 <p className="mt-0.5 text-[13px] text-muted-foreground">
-                  None — points never expire under the launch loyalty policy.
+                  None. Points expiry is part of the live loyalty rule, and no expiry process runs at launch.
                 </p>
               </div>
             </div>
@@ -88,7 +93,7 @@ export default function SettingsPage() {
               <p className="font-medium">Current earn model</p>
               <p className="mt-1 text-muted-foreground">
                 A member spending {formatINR(earn.spend)} earns <span className="font-medium text-foreground">{earn.points} points</span>, multiplied by their tier.
-                1 point ≈ {formatINR(earn.pointValue)}, so {earn.minRedeem} points is worth about {formatINR(Math.round(earn.minRedeem * earn.pointValue))}.
+                1 point ≈ ₹{earn.pointValue.toFixed(2)}, so {earn.minRedeem} points is worth about {formatINR(Math.round(earn.minRedeem * earn.pointValue))}.
               </p>
             </div>
             <div className="mt-4 flex justify-end">

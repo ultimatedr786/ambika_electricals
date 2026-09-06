@@ -3118,3 +3118,442 @@ begin
   select count(*) into v_seen from public.qr_verification_attempts;
   if v_seen <> 0 then raise exception 'ASSERT: staff can read scan attempts (%)', v_seen; end if;
 end $$;
+
+-- CASE: LR1 rule engine — every business starts on the launch policy, and history is stamped
+do $$
+declare v_rule record; v_n int;
+begin
+  execute 'reset role';
+  select v.* into v_rule
+    from public.loyalty_rule_versions v
+    join public.loyalty_rules r on r.id = v.rule_id
+   where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and r.code = 'default'
+   order by v.version limit 1;
+
+  if v_rule.id is null then raise exception 'ASSERT: no default rule installed'; end if;
+  if v_rule.earn_spend_paise <> 10000 or v_rule.earn_points <> 10 then
+    raise exception 'ASSERT: launch earn policy wrong: % → %', v_rule.earn_spend_paise, v_rule.earn_points;
+  end if;
+  if v_rule.point_value_paise <> 10 then
+    raise exception 'ASSERT: launch point value should be 10 paise (₹0.10)';
+  end if;
+  if v_rule.points_expiry_days is not null then
+    raise exception 'ASSERT: launch policy must have no points expiry';
+  end if;
+  if v_rule.version <> 1 or v_rule.effective_to is not null then
+    raise exception 'ASSERT: v1 should be the open version';
+  end if;
+
+  -- The other tenant got its own independent series (never a shared rule).
+  select count(*) into v_n from public.loyalty_rules
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_n <> 1 then raise exception 'ASSERT: second tenant has % default rules', v_n; end if;
+
+  -- Every sale recorded so far carries the version that priced it.
+  select count(*) into v_n from public.sales where loyalty_rule_version_id is null;
+  if v_n <> 0 then raise exception 'ASSERT: % sales are missing a rule version', v_n; end if;
+
+  -- So does every ledger entry that actually refers to a sale. (Manual
+  -- award_points calls may carry source_type 'sale' with a bookkeeping id
+  -- that is not a real sale — those legitimately have no rule version.)
+  select count(*) into v_n from public.points_ledger l
+   where l.loyalty_rule_version_id is null
+     and exists (select 1 from public.sales s where s.id = l.source_id);
+  if v_n <> 0 then raise exception 'ASSERT: % sale-linked ledger entries unstamped', v_n; end if;
+
+  -- The hard-coded columns are gone.
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'businesses'
+       and column_name in ('earn_spend_paise', 'earn_points')
+  ) then
+    raise exception 'ASSERT: hard-coded earn columns still on businesses';
+  end if;
+end $$;
+
+-- CASE: LR2 rule changes are owner-only
+do $$
+declare v_sqlstate text;
+begin
+  -- manager
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.set_loyalty_rule(null, 20000, 10, 10, 0, null, 'manager try');
+    raise exception 'ASSERT: manager could change the loyalty rule';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- store staff
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.set_loyalty_rule(null, 20000, 10, 10, 0, null, 'staff try');
+    raise exception 'ASSERT: staff could change the loyalty rule';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- customer
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.set_loyalty_rule(null, 20000, 10, 10, 0, null, 'customer try');
+    raise exception 'ASSERT: a customer could change the loyalty rule';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- other tenant's owner aiming at this business
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.set_loyalty_rule('aaaaaaaa-0000-4000-8000-000000000001', 20000, 10, 10, 0, null, 'cross tenant');
+    raise exception 'ASSERT: cross-tenant owner could change the rule';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+  if exists (select 1 from public.loyalty_rule_versions v
+              join public.loyalty_rules r on r.id = v.rule_id
+             where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+               and v.version > 1) then
+    raise exception 'ASSERT: a denied attempt still created a version';
+  end if;
+end $$;
+
+-- CASE: LR3 invalid rate / effective-date configuration fails safely
+do $$
+declare v_before int; v_after int;
+begin
+  execute 'reset role';
+  select count(*) into v_before from public.loyalty_rule_versions;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+
+  -- spend threshold below ₹1
+  begin
+    perform public.set_loyalty_rule(null, 50, 10, 10, 0, null, 'too small');
+    raise exception 'ASSERT: sub-rupee spend threshold accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- absurd spend threshold
+  begin
+    perform public.set_loyalty_rule(null, 99999999, 10, 10, 0, null, 'too big');
+    raise exception 'ASSERT: huge spend threshold accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- points out of range
+  begin
+    perform public.set_loyalty_rule(null, 10000, 5000, 10, 0, null, 'too many points');
+    raise exception 'ASSERT: 5000 points per step accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- negative points
+  begin
+    perform public.set_loyalty_rule(null, 10000, -1, 10, 0, null, 'negative');
+    raise exception 'ASSERT: negative points accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- missing required values
+  begin
+    perform public.set_loyalty_rule(null, null, null, 10, 0, null, 'nulls');
+    raise exception 'ASSERT: null rate accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- backdating would re-price settled history
+  begin
+    perform public.set_loyalty_rule(null, 10000, 10, 10, 0, now() - interval '2 days', 'backdate');
+    raise exception 'ASSERT: backdated effective_from accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- absurdly far in the future
+  begin
+    perform public.set_loyalty_rule(null, 10000, 10, 10, 0, now() + interval '400 days', 'too far');
+    raise exception 'ASSERT: effective_from 400 days out accepted';
+  exception when sqlstate '22023' then null;
+  end;
+
+  execute 'reset role';
+  select count(*) into v_after from public.loyalty_rule_versions;
+  if v_after <> v_before then
+    raise exception 'ASSERT: invalid configuration still wrote % version(s)', v_after - v_before;
+  end if;
+end $$;
+
+-- CASE: LR4 owner edit appends a version and closes the previous one (never rewrites)
+do $$
+declare v_res jsonb; v_v1 record; v_v2 record; v_n int;
+begin
+  execute 'reset role';
+  select v.* into v_v1 from public.loyalty_rule_versions v
+    join public.loyalty_rules r on r.id = v.rule_id
+   where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  -- ₹50 → 10 points, and a ₹100 minimum spend
+  select public.set_loyalty_rule(null, 5000, 10, 10, 10000, null, 'Festive rate') into v_res;
+  execute 'reset role';
+
+  if (v_res ->> 'version')::int <> 2 then raise exception 'ASSERT: expected version 2, got %', v_res; end if;
+  if (v_res ->> 'superseded_version')::int <> 1 then raise exception 'ASSERT: v1 not reported superseded: %', v_res; end if;
+
+  select * into v_v2 from public.loyalty_rule_versions where id = (v_res ->> 'version_id')::uuid;
+  if v_v2.earn_spend_paise <> 5000 or v_v2.earn_points <> 10 or v_v2.min_spend_paise <> 10000 then
+    raise exception 'ASSERT: v2 economics wrong';
+  end if;
+  if v_v2.effective_to is not null or v_v2.status <> 'active' then
+    raise exception 'ASSERT: v2 should be the open, active version';
+  end if;
+
+  -- v1 is untouched except for its closing timestamp + status.
+  select * into v_v2 from public.loyalty_rule_versions where id = v_v1.id;
+  if v_v2.earn_spend_paise <> v_v1.earn_spend_paise or v_v2.earn_points <> v_v1.earn_points
+     or v_v2.effective_from <> v_v1.effective_from then
+    raise exception 'ASSERT: v1 economics were rewritten';
+  end if;
+  if v_v2.effective_to is null or v_v2.status <> 'superseded' then
+    raise exception 'ASSERT: v1 was not closed';
+  end if;
+
+  -- Exactly one open window survives.
+  select count(*) into v_n from public.loyalty_rule_versions v
+    join public.loyalty_rules r on r.id = v.rule_id
+   where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.effective_to is null;
+  if v_n <> 1 then raise exception 'ASSERT: % open windows', v_n; end if;
+
+  select count(*) into v_n from public.audit_logs
+   where action = 'loyalty_rule.version_created'
+     and business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+     and (metadata ->> 'version')::int = 2
+     and (metadata -> 'from' ->> 'earn_spend_paise')::bigint = 10000;
+  if v_n <> 1 then raise exception 'ASSERT: rule change not audited with before/after'; end if;
+end $$;
+
+-- CASE: LR5 history keeps its version; new sales use the currently effective one
+do $$
+declare
+  v_mem uuid; v_old_sale uuid; v_old_version uuid; v_old_points int;
+  v_res jsonb; v_v2 uuid; v_ledger record;
+begin
+  execute 'reset role';
+  -- The sale recorded under v1 back in SA1.
+  select id, loyalty_rule_version_id, total_points into v_old_sale, v_old_version, v_old_points
+    from public.sales where idempotency_key = 'sa1-key';
+  if v_old_sale is null then raise exception 'ASSERT: SA1 sale missing'; end if;
+  if (select version from public.loyalty_rule_versions where id = v_old_version) <> 1 then
+    raise exception 'ASSERT: historic sale is not pinned to v1';
+  end if;
+  if v_old_points <> 125 then
+    raise exception 'ASSERT: historic points changed to % after the rule edit', v_old_points;
+  end if;
+
+  select v.id into v_v2 from public.loyalty_rule_versions v
+    join public.loyalty_rules r on r.id = v.rule_id
+   where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 2;
+
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'LR5 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  -- ₹1,250 under v2 (₹50 → 10 pts) = 250 points, not the 125 that v1 paid.
+  select public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Wiring kit","qty":1,"unit_price_paise":125000}]'::jsonb,
+    '[{"method":"cash","amount_paise":125000}]'::jsonb,
+    v_mem, 0, 'lr5-key'
+  ) into v_res;
+  execute 'reset role';
+
+  if (v_res -> 'points' ->> 'base')::int <> 250 then
+    raise exception 'ASSERT: new sale did not use v2 (got %)', v_res;
+  end if;
+  if (v_res ->> 'loyalty_rule_version_id') <> v_v2::text then
+    raise exception 'ASSERT: new sale stamped with the wrong version: %', v_res;
+  end if;
+  if (v_res ->> 'loyalty_rule_version')::int <> 2 then
+    raise exception 'ASSERT: response version wrong: %', v_res;
+  end if;
+
+  -- The old sale is still exactly as it was.
+  if (select loyalty_rule_version_id from public.sales where id = v_old_sale) <> v_old_version then
+    raise exception 'ASSERT: historic sale was re-stamped';
+  end if;
+  if (select total_points from public.sales where id = v_old_sale) <> 125 then
+    raise exception 'ASSERT: historic sale points were recalculated';
+  end if;
+
+  -- Ledger entries inherit the sale's version on both sides of the change.
+  select * into v_ledger from public.points_ledger
+   where source_type = 'sale' and source_id = (v_res ->> 'sale_id')::uuid;
+  if v_ledger.loyalty_rule_version_id <> v_v2 then
+    raise exception 'ASSERT: ledger entry not stamped with v2';
+  end if;
+  select * into v_ledger from public.points_ledger
+   where source_type = 'sale' and source_id = v_old_sale;
+  if v_ledger.loyalty_rule_version_id <> v_old_version then
+    raise exception 'ASSERT: historic ledger entry was re-stamped';
+  end if;
+
+  -- A minimum spend below the threshold earns nothing under v2.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Fuse","qty":1,"unit_price_paise":5000}]'::jsonb,
+    '[{"method":"cash","amount_paise":5000}]'::jsonb,
+    v_mem, 0, 'lr5-min-key'
+  ) into v_res;
+  execute 'reset role';
+  if (v_res -> 'points' ->> 'base')::int <> 0 then
+    raise exception 'ASSERT: minimum spend not enforced: %', v_res;
+  end if;
+end $$;
+
+-- CASE: LR6 versions are immutable and cannot be resurrected
+do $$
+declare v_id uuid;
+begin
+  execute 'reset role';
+  select v.id into v_id from public.loyalty_rule_versions v
+    join public.loyalty_rules r on r.id = v.rule_id
+   where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1;
+
+  -- Even the table owner cannot rewrite the economics.
+  begin
+    update public.loyalty_rule_versions set earn_points = 999 where id = v_id;
+    raise exception 'ASSERT: rule economics were mutable';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update public.loyalty_rule_versions set effective_from = now() where id = v_id;
+    raise exception 'ASSERT: effective_from was mutable';
+  exception when insufficient_privilege then null;
+  end;
+  -- A closed window never reopens.
+  begin
+    update public.loyalty_rule_versions set effective_to = null where id = v_id;
+    raise exception 'ASSERT: a closed window was reopened';
+  exception when insufficient_privilege then null;
+  end;
+  -- Points expiry cannot be configured while no sweeper exists.
+  begin
+    insert into public.loyalty_rule_versions
+      (rule_id, business_id, version, earn_spend_paise, earn_points, effective_from, points_expiry_days)
+    select rule_id, business_id, 99, 10000, 10, now() + interval '2 days', 365
+      from public.loyalty_rule_versions where id = v_id;
+    raise exception 'ASSERT: points expiry was configurable';
+  exception when check_violation then null;
+  end;
+end $$;
+
+-- CASE: LR7 tenancy + visibility + no direct DML for API roles
+do $$
+declare v_n int; v_foreign uuid;
+begin
+  execute 'reset role';
+  select v.id into v_foreign from public.loyalty_rule_versions v
+    join public.loyalty_rules r on r.id = v.rule_id
+   where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000002' limit 1;
+
+  -- A rule version can never be resolved for another tenant.
+  if (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001')).id = v_foreign then
+    raise exception 'ASSERT: cross-tenant rule resolution';
+  end if;
+  if (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000002')).business_id
+     <> 'aaaaaaaa-0000-4000-8000-000000000002' then
+    raise exception 'ASSERT: resolver crossed tenants';
+  end if;
+
+  execute 'set local role authenticated';
+
+  -- Staff read their own business's full history.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_n from public.loyalty_rule_versions;
+  if v_n < 2 then raise exception 'ASSERT: staff cannot read the rule history (%)', v_n; end if;
+  select count(*) into v_n from public.loyalty_rule_versions
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_n <> 0 then raise exception 'ASSERT: staff can read another tenant''s rules'; end if;
+
+  -- A customer sees only what is in force right now — not the history.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_n from public.loyalty_rule_versions;
+  if v_n <> 1 then raise exception 'ASSERT: customer sees % rule versions, expected the current one only', v_n; end if;
+  select count(*) into v_n from public.loyalty_rule_versions where version = 1;
+  if v_n <> 0 then raise exception 'ASSERT: customer can read superseded rate history'; end if;
+
+  -- Another tenant's owner sees nothing of ours.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_n from public.loyalty_rule_versions
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: cross-tenant rule visibility'; end if;
+
+  -- Writes are RPC-only, even for the owner.
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    insert into public.loyalty_rule_versions
+      (rule_id, business_id, version, earn_spend_paise, earn_points, effective_from)
+    values ((select id from public.loyalty_rules where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'),
+            'aaaaaaaa-0000-4000-8000-000000000001', 50, 100, 1000, now());
+    raise exception 'ASSERT: owner inserted a rule version directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.loyalty_rules (business_id, code) values ('aaaaaaaa-0000-4000-8000-000000000001', 'sneaky');
+    raise exception 'ASSERT: owner inserted a rule series directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001');
+    raise exception 'ASSERT: clients can call the internal resolver';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+  if has_function_privilege('anon', 'public.set_loyalty_rule(uuid, bigint, integer, integer, bigint, timestamptz, text)', 'EXECUTE') then
+    raise exception 'ASSERT: anon can set the loyalty rule';
+  end if;
+end $$;
+
+-- CASE: LR8 a scheduled future version does not price today's sales
+do $$
+declare v_res jsonb; v_mem uuid; v_v3 record;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select public.set_loyalty_rule(null, 100000, 10, 10, 0, now() + interval '7 days', 'New year rate') into v_res;
+  execute 'reset role';
+
+  if (v_res ->> 'status') <> 'scheduled' then
+    raise exception 'ASSERT: future version should be scheduled: %', v_res;
+  end if;
+  select * into v_v3 from public.loyalty_rule_versions where id = (v_res ->> 'version_id')::uuid;
+  if v_v3.version <> 3 then raise exception 'ASSERT: expected version 3'; end if;
+
+  -- v2 stays in force until the scheduled start.
+  if (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001')).version <> 2 then
+    raise exception 'ASSERT: the scheduled version took effect early';
+  end if;
+  -- …and it does take effect afterwards.
+  if (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001', now() + interval '8 days')).version <> 3 then
+    raise exception 'ASSERT: the scheduled version never takes effect';
+  end if;
+
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'LR8 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Switchboard","qty":1,"unit_price_paise":100000}]'::jsonb,
+    '[{"method":"cash","amount_paise":100000}]'::jsonb,
+    v_mem, 0, 'lr8-key'
+  ) into v_res;
+  execute 'reset role';
+
+  -- ₹1,000 under v2 (₹50 → 10) = 200 points; under the scheduled v3 it would be 10.
+  if (v_res -> 'points' ->> 'base')::int <> 200 then
+    raise exception 'ASSERT: sale priced by the wrong version: %', v_res;
+  end if;
+end $$;

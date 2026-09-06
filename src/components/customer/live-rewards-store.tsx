@@ -56,6 +56,9 @@ interface CustomerBusiness {
   membershipId: string;
   balance: number;
   rewards: LiveStoreReward[];
+  /** Current loyalty rule figures — never hard-coded, always the live version. */
+  pointValuePaise: number;
+  pointsExpiryDays: number | null;
 }
 
 export function LiveRewardsStore() {
@@ -93,7 +96,7 @@ export function LiveRewardsStore() {
       }
 
       const businessIds = [...new Set(mems.map((m) => m.business_id))];
-      const [balRes, rewardRes, bizRes] = await Promise.all([
+      const [balRes, rewardRes, bizRes, ruleRes] = await Promise.all([
         supabase
           .from("customer_points_balance")
           .select("customer_membership_id, current_points")
@@ -105,6 +108,12 @@ export function LiveRewardsStore() {
           .in("business_id", businessIds)
           .order("points_cost"),
         supabase.from("businesses").select("id, name").in("id", businessIds),
+        // Versioned rule engine (Slice 6) — RLS returns the version in force
+        // right now, so the ₹ value shown is never a stale hard-coded rate.
+        supabase
+          .from("loyalty_rule_versions")
+          .select("business_id, point_value_paise, points_expiry_days")
+          .in("business_id", businessIds),
       ]);
 
       const balances = new Map(
@@ -114,6 +123,15 @@ export function LiveRewardsStore() {
         ])
       );
       const bizNames = new Map(((bizRes.data ?? []) as { id: string; name: string }[]).map((b) => [b.id, b.name]));
+      const ruleByBiz = new Map(
+        ((ruleRes.data ?? []) as Record<string, unknown>[]).map((r) => [
+          String(r.business_id),
+          {
+            pointValuePaise: Number(r.point_value_paise ?? 10),
+            pointsExpiryDays: r.points_expiry_days == null ? null : Number(r.points_expiry_days),
+          },
+        ])
+      );
       const rewardsByBiz = new Map<string, LiveStoreReward[]>();
       for (const r of (rewardRes.data ?? []) as Record<string, unknown>[]) {
         const list = rewardsByBiz.get(String(r.business_id)) ?? [];
@@ -141,6 +159,8 @@ export function LiveRewardsStore() {
           membershipId: m.id,
           balance: balances.get(m.id) ?? 0,
           rewards: rewardsByBiz.get(m.business_id) ?? [],
+          pointValuePaise: ruleByBiz.get(m.business_id)?.pointValuePaise ?? 10,
+          pointsExpiryDays: ruleByBiz.get(m.business_id)?.pointsExpiryDays ?? null,
         }))
       );
     } finally {
@@ -182,7 +202,9 @@ export function LiveRewardsStore() {
                 </h2>
                 <p className="text-xs text-muted-foreground tabular">
                   Your balance: <span className="font-semibold text-foreground">{formatNumber(b.balance)} pts</span>
-                  {" "}≈ {formatINR(b.balance / 10)} · 1 pt = ₹0.10 · no expiry
+                  {" "}≈ {formatINR((b.balance * b.pointValuePaise) / 100)} · 1 pt ={" "}
+                  {formatINR(b.pointValuePaise / 100)} ·{" "}
+                  {b.pointsExpiryDays === null ? "no expiry" : `expires after ${b.pointsExpiryDays} days`}
                 </p>
               </div>
               <Button asChild variant="outline" size="sm">

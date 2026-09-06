@@ -517,3 +517,74 @@ rate limit that reads from it. The function now **returns** `{ok:false, reason:'
 verification failure and raises only `authentication_required` (28000). This is the same lesson the
 rewards slice learned with lazy expiry, now stated as a rule in RLS_POLICIES §4: *an RPC that must
 leave evidence cannot raise.*
+
+## Run 7 — Step 3 Slice 6: versioned loyalty rule engine (94 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**9 files**, incl.
+`20260906170000_loyalty_rules.sql`) → supabase/seed.sql → **94 assertion cases**
+(S/A/W/R/V + L + SA + INV + RE + QR + new **LR1–LR8**).
+
+```
+RLS check · server postgres://postgres:***@127.0.0.1:54329/postgres · throwaway db "rewardly_test"
+APPLIED stubs (14ms)
+APPLIED 20260905120000_auth_foundation_schema.sql (31ms)
+APPLIED 20260905120100_invitations_and_rpcs.sql (16ms)
+APPLIED 20260905120200_rls_policies.sql (19ms)
+APPLIED 20260906120000_points_ledger.sql (20ms)
+APPLIED 20260906130000_sales.sql (28ms)
+APPLIED 20260906140000_inventory.sql (28ms)
+APPLIED 20260906150000_rewards_redemptions.sql (33ms)
+APPLIED 20260906160000_membership_qr_tokens.sql (20ms)
+APPLIED 20260906170000_loyalty_rules.sql (27ms)
+APPLIED seed.sql (32ms)
+… (86 earlier cases unchanged — see Runs 1–6) …
+PASS  LR1 rule engine — every business starts on the launch policy, and history is stamped
+PASS  LR2 rule changes are owner-only
+PASS  LR3 invalid rate / effective-date configuration fails safely
+PASS  LR4 owner edit appends a version and closes the previous one (never rewrites)
+PASS  LR5 history keeps its version; new sales use the currently effective one
+PASS  LR6 versions are immutable and cannot be resurrected
+PASS  LR7 tenancy + visibility + no direct DML for API roles
+PASS  LR8 a scheduled future version does not price today's sales
+
+94/94 RLS cases passed.
+```
+
+pgTAP mirror grew from 185 to **222 assertions** (37 LR assertions):
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 222 ok, 0 not ok — PASSED
+```
+
+### The five behaviours §4 asks for, and where they are proven
+
+| §4 requirement | Case |
+| --- | --- |
+| Only the owner can create/change a rule | LR2 — manager, cashier, customer and a foreign tenant's owner all get 42501, and the version count is unchanged afterwards |
+| Cross-business rules cannot be used | LR7 — the resolver never returns another tenant's version, staff/owners see nothing across the boundary, and the internal resolver is not callable by clients at all |
+| Existing sale history retains its old rule version | LR5 — the SA1 sale is still pinned to v1 with its original 125 points after v2 goes live, and its ledger entry keeps v1 too |
+| A new sale uses the currently effective rule | LR5 (₹1,250 earns 250 pts under v2 instead of 125) and LR8 (a version scheduled for next week does not price today's sale, but does resolve on its date) |
+| Invalid rate/effective-date configuration fails safely | LR3 — seven invalid shapes each raise 22023 and the version count is byte-identical before and after |
+
+### Notes from writing the suite
+
+- **The rule engine has to be self-installing.** The first run failed every sales case with
+  `loyalty_rule_missing`: the migration backfills businesses that exist *at migration time*, but
+  the seed (and `complete_business_signup` in production) creates them afterwards. An AFTER INSERT
+  trigger on `businesses` now installs the launch policy as version 1, so a tenant can never exist
+  without a rule and `create_sale` never has to guess.
+- **`create_sale` v3 is v2 with one step changed.** The first attempt reimplemented the function
+  from scratch and broke four inventory cases on error-message and code differences. It is now the
+  Slice-3 body with exactly four edits: resolve the version, use `loyalty_points_for`, stamp
+  `sales.loyalty_rule_version_id`, and add the version to the audit/response.
+- **The ledger stamp lives in `ledger_post_entry`, not `create_sale`.** `points_ledger` is
+  append-only (a trigger rejects UPDATE even for the owner), so stamping after the fact is
+  impossible by design. Deriving the version inside the shared helper — any entry whose `source_id`
+  is a sale inherits that sale's version — also stamps the void reversal for free.
+- **Immutability is a trigger, not a convention.** LR6 shows `postgres` itself cannot rewrite
+  economics, move `effective_from`, or reopen a closed window. Deletion is deliberately *not*
+  blocked by the trigger: a version must cascade away with its business, and grants already stop
+  every API role from deleting one.

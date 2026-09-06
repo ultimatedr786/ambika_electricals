@@ -59,6 +59,8 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `redemption_counters` | ✗ | ✗ | ✗ | ✗ | internal per-business `RDM-####` sequence, locked inside `redeem_reward`; no grants, no policies |
 | `membership_qr_tokens` | ✗ | ✗ | ✗ | ✗ | **no SELECT for anyone but `service_role`** — the row holds the salted sha256 verifier of a live checkout code; issue/verify/revoke happen entirely inside the definer RPCs |
 | `qr_verification_attempts` SELECT | ✗ | ✗ | whole business | whole business | security trail of every scan (success and failure). Append-only: no DML grants **and** a trigger that rejects UPDATE/DELETE even for postgres. Deliberately invisible to cashiers so the trail cannot be shoulder-audited at the counter |
+| `loyalty_rules` SELECT | own businesses (active membership) | whole business | whole business | whole business | the rule *series*; writes RPC-only (`set_loyalty_rule`) |
+| `loyalty_rule_versions` SELECT | **only the version in force right now** | whole history | whole history | whole history | immutable economics + effective window. A trigger rejects any UPDATE touching `earn_*`, `point_value_paise`, `min_spend_paise`, `points_expiry_days`, `effective_from` or `version`, and refuses to reopen a closed window; only `effective_to`/`status`/`notes` move. Deletion is blocked by grants (it must still cascade with its business) |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -107,6 +109,12 @@ in `src/lib/supabase/admin.ts`).
 | `issue_membership_qr_token` | the signed-in customer | resolves the caller's own active membership (never a client-supplied one); TTL clamped 30–300 s (default 90); **10 issues per minute per membership** (`rate_limited`); minting revokes the previous live token (`revoke_reason = superseded`); only `sha256(salt‖secret)` is stored — the secret exists once, in the response | `membership_qr.issued` (selector + TTL only) |
 | `verify_membership_qr_token` | staff+ of the token's business | **authorization first**: business role, then store scoping (`store_not_in_business` / `store_forbidden`) — lifecycle detail is never revealed to someone who may not scan. Then constant-shape checks: malformed / unknown selector / wrong secret all return the same `qr_invalid`. Single use via a conditional `UPDATE … where consumed_at is null and revoked_at is null`, so concurrent scans cannot both win. **40 verifies per minute per staff profile.** Returns `{ok:false, reason}` instead of raising — see note below | `membership_qr.verified` / `membership_qr.verify_denied` / `membership_qr.verify_failed` / `membership_qr.rate_limited` + a `qr_verification_attempts` row on **every** branch |
 | `revoke_membership_qr_tokens` | the signed-in customer | "hide my QR" / lost device: revokes every live token of the caller's memberships, returns the count | `membership_qr.revoked` (one row per affected business, token count + reason, no selector) |
+| `set_loyalty_rule` | **owner only** | business resolved from the caller's own memberships (a supplied id can only disambiguate between businesses they already own); validates spend ₹1–₹1,00,000, points 0–1000, point value ≤ ₹100, non-negative minimum spend; **backdating refused** (it would re-price settled history) and no start beyond 365 days; locks the series, closes the open version at the new start and appends version N+1 — never rewrites | `loyalty_rule.version_created` (new economics + the previous version's under `from`) |
+| `current_loyalty_rule` | any authenticated reader | SECURITY INVOKER — RLS decides; returns the version in force now | — |
+| `active_loyalty_rule_version` | — internal — | EXECUTE revoked from every API role (like `ledger_post_entry`/`inventory_move`); resolves `effective_from <= at < coalesce(effective_to, infinity)` for the business's `default` series | — |
+| `loyalty_points_for` | any authenticated reader | pure evaluation of one version against an eligible amount: floors on exact paise, honours the minimum spend, returns 0 for an unknown version | — |
+| `create_sale` v3 | staff+ | Slice-3 semantics **plus**: the rate comes from `active_loyalty_rule_version(business, now())` instead of the dropped `businesses.earn_*` columns, and that version id is stamped on `sales.loyalty_rule_version_id`. A business with no rule fails closed (`loyalty_rule_missing`) | `sale.created` (+ `loyalty_rule_version` in metadata) |
+| `ledger_post_entry` v2 | — internal — | unchanged contract; every entry whose `source_id` is a sale inherits that sale's pinned rule version, so the void reversal is stamped too | — |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
@@ -127,8 +135,8 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **86 cases, 86 passed** (Step 2 suite executed 2026-09-05;
-ledger + sales + inventory + rewards/redemptions + membership-QR suites 2026-09-06, against PostgreSQL 18.4 with
+`scripts/rls-check/10_assertions.sql` — **94 cases, 94 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales + inventory + rewards/redemptions + membership-QR + loyalty-rule suites 2026-09-06, against PostgreSQL 18.4 with
 the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
@@ -200,12 +208,28 @@ the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
   (`qr_revoked`) and the 10-per-minute issue limit trips. Grants: no SELECT/INSERT/UPDATE/DELETE
   for API roles on either table, no `anon` EXECUTE on issue/verify. Attempts are append-only
   (trigger refuses even postgres), visible to managers and invisible to cashiers.
+- **LR1–LR8** loyalty rule engine: every business (existing ones by backfill, new ones by an
+  AFTER INSERT trigger) starts on the launch policy — ₹100 → 10 pts, 1 pt = ₹0.10, no expiry — and
+  every sale plus every sale-linked ledger entry carries the version that priced it; the hard-coded
+  `businesses.earn_*` columns are gone. Rule changes are owner-only (manager, cashier, customer and
+  a foreign tenant's owner all get 42501, and a denied attempt writes no version). Invalid
+  configuration fails safely with nothing persisted: sub-₹1 or ₹1,00,000+ spend steps, >1000 or
+  negative points, missing rates, backdated starts and starts beyond a year are all refused (22023).
+  A valid edit appends v2, closes v1 at the new start (`superseded`, economics untouched), leaves
+  exactly one open window and audits before/after. History is frozen: the pre-change sale keeps v1
+  and its 125 points while the next sale earns 250 under v2, ledger entries inherit their sale's
+  version on both sides of the change, and a below-minimum sale earns nothing. Versions are
+  immutable even for `postgres` (economics, `effective_from` and reopening a closed window all
+  42501) and points expiry cannot be configured while no sweeper exists (23514). Tenancy holds: the
+  resolver never crosses businesses, staff read their own history, customers see only the version
+  in force, and even the owner cannot INSERT a rule directly or call the internal resolver. A
+  version scheduled for next week does not price today's sale — but does resolve on its date.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 185 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 222 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
 additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
 harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/lives_ok/throws_ok/finish):
-**185/185 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
+**222/222 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
 (the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices
@@ -260,4 +284,19 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/liv
   member lookup remains the fallback), offline/queued verification, and a sweeper for consumed
   rows (they are small, indexed by `expires_at` and useful evidence; retention lands with the
   backup/retention document).
+- Loyalty rule engine decisions: the versions table is the **only** source of truth — the
+  `businesses.earn_spend_paise` / `earn_points` columns were backfilled into version 1 and then
+  dropped in the same migration, so there is no second place a rate can hide. Supersession is
+  modelled as a closed `[effective_from, effective_to)` window rather than a boolean `is_active`
+  flag: a flag cannot answer "what rate applied on 14 August?", and answering that question is the
+  entire reason sales carry a version id. Backdating is refused rather than supported — a
+  retroactive rate would contradict points that have already been paid out and possibly spent;
+  corrections belong in `adjust_points`, where they are visible in the ledger. Only `spend_earn`
+  is evaluated: the enum names the future models (`tier_multiplier`, `category_bonus`,
+  `campaign_bonus`) so the UI can show them as explicitly future, and a CHECK constraint stops one
+  being configured before any code evaluates it. `points_expiry_days` exists but is CHECKed to null
+  for the whole launch — no expiry sweeper exists, and a configurable expiry with no process behind
+  it is a promise the system would silently break. Deferred: per-store and per-category rule
+  series (the tables are already keyed for them), rule simulation/preview against past sales, and
+  bonus-points stacking (`sales.bonus_points` stays 0).
 

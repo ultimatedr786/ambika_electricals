@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(185);
+select plan(222);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -1498,6 +1498,271 @@ select is(
     'select count(*) from public.qr_verification_attempts'),
   0::bigint,
   'QR8: cashiers cannot read the scan trail'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Versioned loyalty rule engine (20260906170000_loyalty_rules.sql)
+-- Mirrors cases LR1-LR8 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+-- LR1: launch policy installed for every business; history stamped.
+select is(
+  (select v.earn_spend_paise || ':' || v.earn_points || ':' || v.point_value_paise
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  '10000:10:10',
+  'LR1: launch policy is Rs100 -> 10 points, 1 point = 10 paise'
+);
+select is(
+  (select v.points_expiry_days
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  null::integer,
+  'LR1: no points expiry at launch'
+);
+select is(
+  (select count(*) from public.loyalty_rules
+    where business_id = 'aaaaaaaa-0000-4000-8000-000000000002')::int,
+  1,
+  'LR1: the second tenant gets its own independent rule series'
+);
+select is(
+  (select count(*) from public.sales where loyalty_rule_version_id is null)::int,
+  0,
+  'LR1: every sale is stamped with the version that priced it'
+);
+select is(
+  (select count(*) from information_schema.columns
+    where table_schema = 'public' and table_name = 'businesses'
+      and column_name in ('earn_spend_paise', 'earn_points'))::int,
+  0,
+  'LR1: the hard-coded earn columns are gone from businesses'
+);
+
+-- LR2: owner-only.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.set_loyalty_rule(null, 20000, 10, 10, 0, null, ''manager'')'),
+  '42501',
+  'LR2: a manager cannot change the loyalty rule'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.set_loyalty_rule(null, 20000, 10, 10, 0, null, ''staff'')'),
+  '42501',
+  'LR2: a cashier cannot change the loyalty rule'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.set_loyalty_rule(null, 20000, 10, 10, 0, null, ''customer'')'),
+  '42501',
+  'LR2: a customer cannot change the loyalty rule'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select public.set_loyalty_rule(''aaaaaaaa-0000-4000-8000-000000000001'',
+       20000, 10, 10, 0, null, ''cross tenant'')'),
+  '42501',
+  'LR2: another tenant''s owner cannot change our rule'
+);
+
+-- LR3: invalid configuration fails safely.
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 50, 10, 10, 0, null, ''tiny'')'),
+  '22023',
+  'LR3: a sub-rupee spend threshold is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 10000, 5000, 10, 0, null, ''greedy'')'),
+  '22023',
+  'LR3: 5000 points per step is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, null, null, 10, 0, null, ''nulls'')'),
+  '22023',
+  'LR3: a missing rate is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 10000, 10, 10, 0, now() - interval ''2 days'', ''backdate'')'),
+  '22023',
+  'LR3: backdating (which would re-price settled history) is refused'
+);
+select is(
+  (select count(*) from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001')::int,
+  1,
+  'LR3: no invalid attempt wrote a version'
+);
+
+-- LR4: an owner edit appends v2 and closes v1.
+select set_config('app.lr_v2',
+  extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 5000, 10, 10, 10000, null, ''Festive rate'')::text'), true);
+select is(
+  current_setting('app.lr_v2', true)::jsonb ->> 'version', '2',
+  'LR4: the edit appends version 2'
+);
+select is(
+  current_setting('app.lr_v2', true)::jsonb ->> 'superseded_version', '1',
+  'LR4: version 1 is reported superseded'
+);
+select is(
+  (select v.status::text || ':' || (v.effective_to is not null)::text
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  'superseded:true',
+  'LR4: version 1 is closed, not rewritten'
+);
+select is(
+  (select v.earn_spend_paise || ':' || v.earn_points
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  '10000:10',
+  'LR4: version 1 economics are untouched'
+);
+select is(
+  (select count(*) from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+      and v.effective_to is null)::int,
+  1,
+  'LR4: exactly one open window survives'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action = 'loyalty_rule.version_created'
+      and (metadata ->> 'version')::int = 2
+      and (metadata -> 'from' ->> 'earn_spend_paise')::bigint = 10000)::int,
+  1,
+  'LR4: the change is audited with before and after'
+);
+
+-- LR5: history keeps its version; new sales use the current one.
+select is(
+  (select v.version from public.sales s
+     join public.loyalty_rule_versions v on v.id = s.loyalty_rule_version_id
+    where s.idempotency_key = 'pgtap-sa1'),
+  1,
+  'LR5: the pre-change sale is still pinned to version 1'
+);
+select set_config('app.lr_sale2',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(
+       ''bbbbbbbb-0000-4000-8000-000000000001'',
+       ''[{"name":"Wiring kit","qty":1,"unit_price_paise":125000}]''::jsonb,
+       ''[{"method":"cash","amount_paise":125000}]''::jsonb,
+       (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1''),
+       0, ''pgtap-lr5'')::text'), true);
+select is(
+  current_setting('app.lr_sale2', true)::jsonb -> 'points' ->> 'base', '250',
+  'LR5: the new sale earns at the v2 rate (Rs50 -> 10 pts)'
+);
+select is(
+  current_setting('app.lr_sale2', true)::jsonb ->> 'loyalty_rule_version', '2',
+  'LR5: the new sale is stamped with version 2'
+);
+select is(
+  (select l.loyalty_rule_version_id from public.points_ledger l
+    where l.source_id = (current_setting('app.lr_sale2', true)::jsonb ->> 'sale_id')::uuid
+      and l.source_type = 'sale'),
+  (current_setting('app.lr_sale2', true)::jsonb ->> 'loyalty_rule_version_id')::uuid,
+  'LR5: the ledger entry inherits the sale''s version'
+);
+select is(
+  (select s.total_points from public.sales s where s.idempotency_key = 'pgtap-sa1'),
+  125,
+  'LR5: the historic sale''s points were not recalculated'
+);
+
+-- LR6: immutability.
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.loyalty_rule_versions set earn_points = 999'),
+  '42501',
+  'LR6: rule economics cannot be rewritten, even by postgres'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.loyalty_rule_versions set effective_to = null where version = 1'),
+  '42501',
+  'LR6: a closed window cannot be reopened'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'insert into public.loyalty_rule_versions
+       (rule_id, business_id, version, earn_spend_paise, earn_points, effective_from, points_expiry_days)
+     select rule_id, business_id, 99, 10000, 10, now() + interval ''2 days'', 365
+       from public.loyalty_rule_versions limit 1'),
+  '23514',
+  'LR6: points expiry cannot be configured while no sweeper exists'
+);
+
+-- LR7: tenancy, visibility and RPC-only writes.
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.loyalty_rule_versions'),
+  1::bigint,
+  'LR7: a customer sees only the rule in force right now'
+);
+select ok(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.loyalty_rule_versions') >= 2,
+  'LR7: staff can read their own business rule history'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.loyalty_rule_versions
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  0::bigint,
+  'LR7: rule history never crosses tenants'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'insert into public.loyalty_rules (business_id, code)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''sneaky'')'),
+  '42501',
+  'LR7: even the owner cannot write rules directly (RPC-only)'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.active_loyalty_rule_version(''aaaaaaaa-0000-4000-8000-000000000001'')'),
+  '42501',
+  'LR7: the internal resolver is not callable by clients'
+);
+select ok(
+  not has_function_privilege('anon',
+    'public.set_loyalty_rule(uuid, bigint, integer, integer, bigint, timestamptz, text)', 'EXECUTE'),
+  'LR7: anon cannot set the loyalty rule'
+);
+
+-- LR8: a scheduled version does not price today's sales.
+select set_config('app.lr_v3',
+  extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 100000, 10, 10, 0, now() + interval ''7 days'', ''New year'')::text'), true);
+select is(
+  current_setting('app.lr_v3', true)::jsonb ->> 'status', 'scheduled',
+  'LR8: a future version is scheduled, not active'
+);
+select is(
+  (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001')).version,
+  2,
+  'LR8: today still resolves to version 2'
+);
+select is(
+  (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001',
+     now() + interval '8 days')).version,
+  3,
+  'LR8: the scheduled version takes effect on its date'
 );
 
 select * from finish();

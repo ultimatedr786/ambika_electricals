@@ -86,7 +86,7 @@ export function LivePosPanel() {
   const [role, setRole] = React.useState<"owner" | "manager" | "staff" | null>(null);
   const [stores, setStores] = React.useState<{ id: string; name: string }[]>([]);
   const [storeId, setStoreId] = React.useState<string | null>(null);
-  const [earn, setEarn] = React.useState({ spendPaise: 10000, points: 10 });
+  const [earn, setEarn] = React.useState({ spendPaise: 10000, points: 10, minSpendPaise: 0, version: 1 });
 
   // Customer picker
   const [query, setQuery] = React.useState("");
@@ -141,15 +141,24 @@ export function LivePosPanel() {
       setRole(rows[0].role);
 
       const [businessRes, storeRes, scopeRes] = await Promise.all([
-        supabase.from("businesses").select("earn_spend_paise, earn_points").eq("id", bid).maybeSingle(),
+        // Versioned rule engine (Slice 6): the *preview* rate. The points that
+        // actually post come from the version create_sale resolves server-side.
+        supabase.rpc("current_loyalty_rule", { p_business_id: bid }),
         supabase.from("stores").select("id, name").eq("business_id", bid).order("name"),
         rows[0].role === "staff"
           ? supabase.from("store_memberships").select("store_id").eq("profile_id", user.id)
           : Promise.resolve({ data: [] }),
       ]);
-      const b = businessRes.data as { earn_spend_paise?: number; earn_points?: number } | null;
-      if (b?.earn_spend_paise && b?.earn_points) {
-        setEarn({ spendPaise: Number(b.earn_spend_paise), points: Number(b.earn_points) });
+      const rule = businessRes.data as {
+        earn_spend_paise?: number; earn_points?: number; min_spend_paise?: number; version?: number;
+      } | null;
+      if (rule?.earn_spend_paise) {
+        setEarn({
+          spendPaise: Number(rule.earn_spend_paise),
+          points: Number(rule.earn_points ?? 0),
+          minSpendPaise: Number(rule.min_spend_paise ?? 0),
+          version: Number(rule.version ?? 1),
+        });
       }
 
       let storeRows = (storeRes.data ?? []) as { id: string; name: string }[];
@@ -246,7 +255,12 @@ export function LivePosPanel() {
   const subtotalPaise = lines.reduce((sum, l) => sum + linePaise(l), 0);
   const discountPaise = Math.min(toPaise(discount), subtotalPaise);
   const totalPaise = Math.max(subtotalPaise - discountPaise, 0);
-  const previewPoints = customer && totalPaise > 0 ? Math.floor((totalPaise * earn.points) / earn.spendPaise) : 0;
+  // Preview only — mirrors public.loyalty_points_for(), including the minimum
+  // spend gate. The server response is what gets stored and shown on the receipt.
+  const previewPoints =
+    customer && totalPaise > 0 && totalPaise >= earn.minSpendPaise
+      ? Math.floor((totalPaise * earn.points) / earn.spendPaise)
+      : 0;
 
   const filledLines = lines.filter((l) => (l.productId || l.name.trim().length > 0) && linePaise(l) > 0);
   const canSubmit =
@@ -641,8 +655,10 @@ export function LivePosPanel() {
               <p className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-2.5 py-1.5 text-xs text-emerald-700 dark:text-emerald-400">
                 <Sparkles className="size-3.5 shrink-0" aria-hidden />
                 {previewPoints > 0
-                  ? `Member earns ≈ ${previewPoints} pts (₹${earn.spendPaise / 100} → ${earn.points} pts, server-authoritative)`
-                  : "No points on this total yet"}
+                  ? `Member earns ≈ ${previewPoints} pts (rule v${earn.version}: ₹${earn.spendPaise / 100} → ${earn.points} pts, server-authoritative)`
+                  : earn.minSpendPaise > 0 && totalPaise > 0 && totalPaise < earn.minSpendPaise
+                    ? `Below the ₹${earn.minSpendPaise / 100} minimum spend — no points on this sale`
+                    : "No points on this total yet"}
               </p>
             )}
             <div className="space-y-1.5">
