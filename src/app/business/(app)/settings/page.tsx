@@ -16,6 +16,7 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { InstallAppAction } from "@/components/shared/install-app-action";
 import { LiveLoyaltyRulePanel } from "@/components/business/live-loyalty-rule-panel";
+import { LiveBusinessSettingsPanel } from "@/components/business/live-business-settings-panel";
 import { isDemoDevToolsEnabled } from "@/lib/auth/env";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
@@ -50,7 +51,11 @@ export default function SettingsPage() {
           <TabsTrigger value="appearance">Appearance</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="business" className="mt-4">
+        <TabsContent value="business" className="mt-4 space-y-4">
+          {/* Real, role-authorized settings. Renders only when Supabase is
+              configured; the prototype card below stays for demo mode. */}
+          <LiveBusinessSettingsPanel />
+
           <Card className="p-5">
             <h2 className="flex items-center gap-2 text-sm font-semibold"><Building2 className="size-4 text-muted-foreground" aria-hidden /> Business profile</h2>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">

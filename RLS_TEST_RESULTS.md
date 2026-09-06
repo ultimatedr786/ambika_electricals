@@ -640,3 +640,54 @@ pgTAP stub run: 264 ok, 0 not ok — PASSED
   but still a bug; caught by QR3/QR8 rather than by a notification case.
 - **Emitting from triggers keeps the blast radius at zero.** Ten prior migrations' RPC bodies are
   untouched by this slice; the whole notification surface is additive.
+
+## Run 9 — Step 3 Slice 8: catalogue images (Storage) + essential settings (109 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**11 files**, incl.
+`20260906190000_storage_and_settings.sql`) → supabase/seed.sql → **109 assertion cases**
+(previous 101 + new **ST1–ST4**, **SET1–SET4**).
+
+```
+… (101 earlier cases unchanged — see Runs 1–8) …
+PASS  ST1 catalogue images — manager+ can attach; validation rejects everything else
+PASS  ST2 catalogue images — authorization and tenancy
+PASS  ST3 catalogue images — thumbnail, alt text and detach behaviour
+PASS  ST4 reward images are visible to members of that business only
+PASS  SET1 business identity — owner only, validated, audited
+PASS  SET2 stores — owner-only upsert, close instead of delete, tenant-safe
+PASS  SET3 notification preferences — per profile, security never mutable
+PASS  SET4 settings surface — grants and anonymous denial
+
+109/109 RLS cases passed.
+```
+
+pgTAP mirror grew from 264 to **303 assertions** (39 ST/SET assertions):
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 303 ok, 0 not ok — PASSED
+```
+
+### Two real bugs the tests caught
+
+Both were in code I had just written and believed correct:
+
+1. **`attach_catalogue_image` violated its own unique index.** It inserted the new image with
+   `is_primary = true` and demoted the previous thumbnail *afterwards*, so
+   `catalogue_images_one_primary_product` fired mid-statement and the whole attach failed — but
+   only on the **second** upload for a product, which a happy-path smoke test would never reach.
+   ST3 hit it immediately. The demotion now happens before the insert.
+2. **`upsert_store` referenced a column that does not exist.** I wrote `address`; the table has
+   `address_line` (plus `city`/`region`). SET2 failed with `column "address" of relation "stores"
+   does not exist`. The RPC now matches the real schema and exposes `city`/`region` too.
+
+Neither would have been visible from the UI until an owner tried the exact second action.
+
+### Storage note for the harness
+
+The `storage` schema exists on Supabase but not on the bare PostgreSQL the local harness uses, so
+the bucket and policy block is wrapped in a guarded `DO` that emits a notice and returns. The
+migration therefore applies identically to both, and the bucket policies are exercised on staging
+rather than here — called out in the owner checklist rather than silently assumed.

@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(264);
+select plan(303);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -2068,6 +2068,302 @@ select is(
       and tablename = 'notification_reads')::int,
   0,
   'NT7: personal read state is never published to Realtime'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Catalogue images + essential settings (20260906190000_storage_and_settings.sql)
+-- Mirrors cases ST1-ST4 / SET1-SET4 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+select set_config('app.st_prod',
+  (select id::text from public.products
+    where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' order by sku limit 1), true);
+
+-- ST1: manager attaches; every validation rule bites.
+select set_config('app.st_img',
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/%s/a.webp'', ''image/webp'',
+              120000, 800, 800, ''Nine watt LED bulb'')::text',
+           current_setting('app.st_prod', true), current_setting('app.st_prod', true))), true);
+select is(
+  current_setting('app.st_img', true)::jsonb ->> 'is_primary', 'true',
+  'ST1: the first image becomes the thumbnail'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/b.svg'', ''image/svg+xml'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: SVG is refused (it can carry script)'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/c.jpg'', ''image/jpeg'', 99999999)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: an oversized upload is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000002/x/d.jpg'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: a path under another tenant''s folder is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/../../etc/passwd'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: path traversal is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''reward-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/e.jpg'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: a product cannot be filed in the reward bucket'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.attach_catalogue_image(null, null, ''product-images'',
+       ''aaaaaaaa-0000-4000-8000-000000000001/x/f.jpg'', ''image/jpeg'', 1000)'),
+  '22023',
+  'ST1: an image must belong to exactly one product or reward'
+);
+select is(
+  (select count(*) from public.catalogue_images
+    where product_id = current_setting('app.st_prod', true)::uuid)::int,
+  1,
+  'ST1: no rejected upload left a row behind'
+);
+
+-- ST2: authorization and tenancy.
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select count(*) from public.catalogue_images
+             where product_id = %L', current_setting('app.st_prod', true))),
+  1::bigint,
+  'ST2: cashiers may look at catalogue images'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/staff.jpg'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '42501',
+  'ST2: a cashier cannot attach an image'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.catalogue_images
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  0::bigint,
+  'ST2: catalogue images never cross tenants'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select count(*) from public.catalogue_images
+             where product_id = %L', current_setting('app.st_prod', true))),
+  0::bigint,
+  'ST2: customers cannot browse product images yet'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    format('insert into public.catalogue_images
+             (business_id, product_id, bucket, path, mime_type, size_bytes)
+            values (''aaaaaaaa-0000-4000-8000-000000000001'', %L, ''product-images'',
+                    ''aaaaaaaa-0000-4000-8000-000000000001/direct.jpg'', ''image/jpeg'', 100)',
+           current_setting('app.st_prod', true))),
+  '42501',
+  'ST2: even the owner cannot insert an image row directly'
+);
+
+-- ST3: thumbnail, alt text, detach.
+select set_config('app.st_img2',
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/%s/second.png'', ''image/png'',
+              90000, 600, 600, ''Side view'', true)::text',
+           current_setting('app.st_prod', true), current_setting('app.st_prod', true))), true);
+select is(
+  (select count(*) from public.catalogue_images
+    where product_id = current_setting('app.st_prod', true)::uuid and is_primary)::int,
+  1,
+  'ST3: exactly one thumbnail survives a second upload'
+);
+select is(
+  (select is_primary from public.catalogue_images
+    where id = (current_setting('app.st_img2', true)::jsonb ->> 'image_id')::uuid),
+  true,
+  'ST3: make_primary moved the thumbnail'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    format('update public.catalogue_images set is_primary = true where id = %L',
+           current_setting('app.st_img', true)::jsonb ->> 'image_id')),
+  '23505',
+  'ST3: two thumbnails are impossible, not merely discouraged'
+);
+select is(
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.set_catalogue_image_alt(%L, ''  Front view  '')::text',
+           current_setting('app.st_img', true)::jsonb ->> 'image_id')),
+  'true',
+  'ST3: alt text is editable without re-uploading'
+);
+select is(
+  (select alt_text from public.catalogue_images
+    where id = (current_setting('app.st_img', true)::jsonb ->> 'image_id')::uuid),
+  'Front view',
+  'ST3: alt text is trimmed on the way in'
+);
+select is(
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.detach_catalogue_image(%L) ->> ''bucket''',
+           current_setting('app.st_img2', true)::jsonb ->> 'image_id')),
+  'product-images',
+  'ST3: detach returns the storage coordinates so the object can be removed'
+);
+select is(
+  (select is_primary from public.catalogue_images
+    where id = (current_setting('app.st_img', true)::jsonb ->> 'image_id')::uuid),
+  true,
+  'ST3: deleting the thumbnail promotes a survivor'
+);
+
+-- SET1: business identity.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.update_business_profile(''Hijacked'')'),
+  '42501',
+  'SET1: a manager cannot edit the business profile'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.update_business_profile(null, null, null, ''not-an-email'')'),
+  '22023',
+  'SET1: a malformed support email is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.update_business_profile(null, null, ''NOTAGSTIN'')'),
+  '22023',
+  'SET1: a malformed GSTIN is refused'
+);
+select lives_ok(
+  $$select extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+      'select public.update_business_profile(''Ambika Electricals & Sons'')::text')$$,
+  'SET1: the owner can rename the business'
+);
+select is(
+  (select name from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000001'),
+  'Ambika Electricals & Sons',
+  'SET1: the new name is stored'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action = 'business.profile_updated'
+      and metadata -> 'from' ->> 'name' = 'Ambika Electricals')::int,
+  1,
+  'SET1: the change is audited with the previous value'
+);
+
+-- SET2: stores.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.upsert_store(null, ''Manager Store'')'),
+  '42501',
+  'SET2: a manager cannot create a store'
+);
+select set_config('app.st_store',
+  extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.upsert_store(null, ''Karelibaug Counter'', ''KRB'')::text'), true);
+select is(
+  current_setting('app.st_store', true)::jsonb ->> 'created', 'true',
+  'SET2: the owner can open a store'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.upsert_store(''bbbbbbbb-0000-4000-8000-000000000009'', ''Steal'')'),
+  '22023',
+  'SET2: another tenant''s store id looks exactly like a missing one'
+);
+select lives_ok(
+  $$select extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+      format('select public.upsert_store(%L, null, null, null, null, false)::text',
+             current_setting('app.st_store', true)::jsonb ->> 'store_id'))$$,
+  'SET2: closing a store is a status flip'
+);
+select is(
+  (select is_active from public.stores
+    where id = (current_setting('app.st_store', true)::jsonb ->> 'store_id')::uuid),
+  false,
+  'SET2: the store is closed but still present for history'
+);
+select is(
+  (select name from public.stores
+    where id = (current_setting('app.st_store', true)::jsonb ->> 'store_id')::uuid),
+  'Karelibaug Counter',
+  'SET2: closing did not blank the other fields'
+);
+
+-- SET3: notification preferences.
+select lives_ok(
+  $$select extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+      'select public.set_notification_preferences(
+         ''aaaaaaaa-0000-4000-8000-000000000001'', array[''stock'', ''rule''])::text')$$,
+  'SET3: a cashier can mute categories for their business'
+);
+select is(
+  (select array_to_string(muted_categories, ',') from public.notification_preferences
+    where profile_id = '33333333-3333-4333-8333-333333333333'),
+  'stock,rule',
+  'SET3: the preference is stored'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.set_notification_preferences(
+       ''aaaaaaaa-0000-4000-8000-000000000001'', array[''security''])'),
+  '22023',
+  'SET3: security notifications can never be muted'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select public.set_notification_preferences(
+       ''aaaaaaaa-0000-4000-8000-000000000001'', array[''stock''])'),
+  '42501',
+  'SET3: an outsider cannot set preferences for another tenant'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select count(*) from public.notification_preferences'),
+  0::bigint,
+  'SET3: preferences are private to their owner'
+);
+
+-- SET4: grants.
+select ok(
+  not has_function_privilege('anon',
+    'public.attach_catalogue_image(uuid, uuid, text, text, text, bigint, integer, integer, text, boolean)', 'EXECUTE')
+  and not has_function_privilege('anon',
+    'public.update_business_profile(text, text, text, text, text)', 'EXECUTE')
+  and not has_function_privilege('anon',
+    'public.set_notification_preferences(uuid, text[])', 'EXECUTE'),
+  'SET4: anon cannot call any settings RPC'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.catalogue_images', 'INSERT')
+  and not has_table_privilege('authenticated', 'public.catalogue_images', 'DELETE')
+  and not has_table_privilege('authenticated', 'public.notification_preferences', 'INSERT'),
+  'SET4: settings tables are RPC-write-only'
 );
 
 select * from finish();

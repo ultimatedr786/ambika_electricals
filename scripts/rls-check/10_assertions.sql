@@ -3895,3 +3895,379 @@ begin
     raise exception 'ASSERT: notifications are directly writable by API roles';
   end if;
 end $$;
+
+-- CASE: ST1 catalogue images — manager+ can attach; validation rejects everything else
+do $$
+declare v_prod uuid; v_biz text := 'aaaaaaaa-0000-4000-8000-000000000001'; v_res jsonb; v_n int;
+begin
+  execute 'reset role';
+  select id into v_prod from public.products where business_id = v_biz::uuid order by sku limit 1;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+
+  select public.attach_catalogue_image(
+    v_prod, null, 'product-images', v_biz || '/' || v_prod::text || '/a.webp',
+    'image/webp', 120000, 800, 800, 'Nine watt LED bulb on a white background'
+  ) into v_res;
+  if (v_res ->> 'image_id') is null then raise exception 'ASSERT: manager could not attach an image'; end if;
+  if (v_res ->> 'is_primary')::boolean is not true then
+    raise exception 'ASSERT: the first image should become the thumbnail';
+  end if;
+
+  -- MIME allowlist.
+  begin
+    perform public.attach_catalogue_image(v_prod, null, 'product-images',
+      v_biz || '/' || v_prod::text || '/b.svg', 'image/svg+xml', 1000, null, null, null);
+    raise exception 'ASSERT: svg accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- Size cap.
+  begin
+    perform public.attach_catalogue_image(v_prod, null, 'product-images',
+      v_biz || '/' || v_prod::text || '/c.jpg', 'image/jpeg', 99999999, null, null, null);
+    raise exception 'ASSERT: oversized upload accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- Path must sit under the caller's own business folder.
+  begin
+    perform public.attach_catalogue_image(v_prod, null, 'product-images',
+      'aaaaaaaa-0000-4000-8000-000000000002/x/d.jpg', 'image/jpeg', 1000, null, null, null);
+    raise exception 'ASSERT: cross-tenant path accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- Traversal.
+  begin
+    perform public.attach_catalogue_image(v_prod, null, 'product-images',
+      v_biz || '/../../etc/passwd', 'image/jpeg', 1000, null, null, null);
+    raise exception 'ASSERT: path traversal accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  -- Bucket must match the owner kind.
+  begin
+    perform public.attach_catalogue_image(v_prod, null, 'reward-images',
+      v_biz || '/' || v_prod::text || '/e.jpg', 'image/jpeg', 1000, null, null, null);
+    raise exception 'ASSERT: product filed under the reward bucket';
+  exception when sqlstate '22023' then null;
+  end;
+  -- Exactly one owner.
+  begin
+    perform public.attach_catalogue_image(null, null, 'product-images',
+      v_biz || '/x/f.jpg', 'image/jpeg', 1000, null, null, null);
+    raise exception 'ASSERT: ownerless image accepted';
+  exception when sqlstate '22023' then null;
+  end;
+
+  execute 'reset role';
+  select count(*) into v_n from public.catalogue_images where product_id = v_prod;
+  if v_n <> 1 then raise exception 'ASSERT: % image rows after rejections, expected 1', v_n; end if;
+end $$;
+
+-- CASE: ST2 catalogue images — authorization and tenancy
+do $$
+declare v_prod uuid; v_biz text := 'aaaaaaaa-0000-4000-8000-000000000001'; v_img uuid; v_n int;
+begin
+  execute 'reset role';
+  select id into v_prod from public.products where business_id = v_biz::uuid order by sku limit 1;
+  select id into v_img from public.catalogue_images where product_id = v_prod;
+
+  execute 'set local role authenticated';
+
+  -- Cashiers may look, not touch.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_n from public.catalogue_images where id = v_img;
+  if v_n <> 1 then raise exception 'ASSERT: staff cannot see their catalogue images'; end if;
+  begin
+    perform public.attach_catalogue_image(v_prod, null, 'product-images',
+      v_biz || '/' || v_prod::text || '/staff.jpg', 'image/jpeg', 1000, null, null, null);
+    raise exception 'ASSERT: cashier attached an image';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.detach_catalogue_image(v_img);
+    raise exception 'ASSERT: cashier detached an image';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Another tenant sees nothing and can do nothing.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_n from public.catalogue_images where business_id = v_biz::uuid;
+  if v_n <> 0 then raise exception 'ASSERT: cross-tenant image visibility'; end if;
+  begin
+    perform public.set_primary_catalogue_image(v_img);
+    raise exception 'ASSERT: cross-tenant primary change allowed';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Customers cannot browse product images (no customer catalogue yet).
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_n from public.catalogue_images where product_id = v_prod;
+  if v_n <> 0 then raise exception 'ASSERT: customer can browse product images'; end if;
+
+  -- No direct DML for anyone, including the owner.
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    insert into public.catalogue_images (business_id, product_id, bucket, path, mime_type, size_bytes)
+    values (v_biz::uuid, v_prod, 'product-images', v_biz || '/direct.jpg', 'image/jpeg', 100);
+    raise exception 'ASSERT: owner inserted an image row directly';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+end $$;
+
+-- CASE: ST3 catalogue images — thumbnail, alt text and detach behaviour
+do $$
+declare v_prod uuid; v_biz text := 'aaaaaaaa-0000-4000-8000-000000000001';
+        v_first uuid; v_second uuid; v_res jsonb; v_n int; v_alt text;
+begin
+  execute 'reset role';
+  select id into v_prod from public.products where business_id = v_biz::uuid order by sku limit 1;
+  select id into v_first from public.catalogue_images where product_id = v_prod;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+
+  select public.attach_catalogue_image(
+    v_prod, null, 'product-images', v_biz || '/' || v_prod::text || '/second.png',
+    'image/png', 90000, 600, 600, 'Side view', true
+  ) into v_res;
+  v_second := (v_res ->> 'image_id')::uuid;
+
+  execute 'reset role';
+  -- Exactly one primary, and it moved to the new image.
+  select count(*) into v_n from public.catalogue_images where product_id = v_prod and is_primary;
+  if v_n <> 1 then raise exception 'ASSERT: % primary images', v_n; end if;
+  if not (select is_primary from public.catalogue_images where id = v_second) then
+    raise exception 'ASSERT: make_primary was ignored';
+  end if;
+
+  -- The unique index is a hard guarantee, not just RPC discipline.
+  begin
+    update public.catalogue_images set is_primary = true where id = v_first;
+    raise exception 'ASSERT: two primaries allowed';
+  exception when unique_violation then null;
+  end;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  -- Alt text is editable without re-uploading.
+  perform public.set_catalogue_image_alt(v_first, '  Nine watt LED bulb, front view  ');
+  -- Detaching the thumbnail promotes a survivor rather than leaving none.
+  select public.detach_catalogue_image(v_second) into v_res;
+  execute 'reset role';
+
+  if (v_res ->> 'path') is null then raise exception 'ASSERT: detach did not return storage coordinates'; end if;
+  select alt_text into v_alt from public.catalogue_images where id = v_first;
+  if v_alt <> 'Nine watt LED bulb, front view' then
+    raise exception 'ASSERT: alt text not trimmed/stored: %', v_alt;
+  end if;
+  if not (select is_primary from public.catalogue_images where id = v_first) then
+    raise exception 'ASSERT: no thumbnail after deleting the primary';
+  end if;
+  select count(*) into v_n from public.catalogue_images where product_id = v_prod;
+  if v_n <> 1 then raise exception 'ASSERT: detach left % rows', v_n; end if;
+end $$;
+
+-- CASE: ST4 reward images are visible to members of that business only
+do $$
+declare v_reward uuid; v_biz text := 'aaaaaaaa-0000-4000-8000-000000000001'; v_n int; v_res jsonb;
+begin
+  execute 'reset role';
+  select id into v_reward from public.rewards
+   where business_id = v_biz::uuid and status = 'active' order by points_cost limit 1;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.attach_catalogue_image(
+    null, v_reward, 'reward-images', v_biz || '/' || v_reward::text || '/r.webp',
+    'image/webp', 50000, 400, 400, 'Free LED bulb reward'
+  ) into v_res;
+
+  -- A member of this business sees the reward's image…
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_n from public.catalogue_images where reward_id = v_reward;
+  if v_n <> 1 then raise exception 'ASSERT: member cannot see an active reward''s image'; end if;
+
+  -- …and someone from another tenant does not.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_n from public.catalogue_images where reward_id = v_reward;
+  if v_n <> 0 then raise exception 'ASSERT: cross-tenant reward image visibility'; end if;
+
+  execute 'reset role';
+end $$;
+
+-- CASE: SET1 business identity — owner only, validated, audited
+do $$
+declare v_n int; v_name text;
+begin
+  execute 'set local role authenticated';
+
+  -- Manager and staff cannot edit identity.
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.update_business_profile('Hijacked Electricals');
+    raise exception 'ASSERT: manager edited the business profile';
+  exception when insufficient_privilege then null;
+  end;
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.update_business_profile('Hijacked Electricals');
+    raise exception 'ASSERT: staff edited the business profile';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Owner: validation first.
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    perform public.update_business_profile('A');
+    raise exception 'ASSERT: one-character business name accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform public.update_business_profile(null, null, null, 'not-an-email');
+    raise exception 'ASSERT: malformed support email accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform public.update_business_profile(null, null, 'NOTAGSTIN');
+    raise exception 'ASSERT: malformed GSTIN accepted';
+  exception when sqlstate '22023' then null;
+  end;
+
+  perform public.update_business_profile('Ambika Electricals & Sons', null, null, 'help@ambika.local');
+  execute 'reset role';
+
+  select name into v_name from public.businesses
+   where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_name <> 'Ambika Electricals & Sons' then
+    raise exception 'ASSERT: business name not updated (%)', v_name;
+  end if;
+  select count(*) into v_n from public.audit_logs
+   where action = 'business.profile_updated'
+     and business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+     and metadata -> 'from' ->> 'name' = 'Ambika Electricals';
+  if v_n <> 1 then raise exception 'ASSERT: profile change not audited with the previous value'; end if;
+end $$;
+
+-- CASE: SET2 stores — owner-only upsert, close instead of delete, tenant-safe
+do $$
+declare v_res jsonb; v_id uuid; v_n int;
+begin
+  execute 'set local role authenticated';
+
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.upsert_store(null, 'Manager Store');
+    raise exception 'ASSERT: manager created a store';
+  exception when insufficient_privilege then null;
+  end;
+
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    perform public.upsert_store(null, 'X');
+    raise exception 'ASSERT: one-character store name accepted';
+  exception when sqlstate '22023' then null;
+  end;
+
+  select public.upsert_store(null, 'Karelibaug Counter', 'KRB', 'Karelibaug, Vadodara') into v_res;
+  v_id := (v_res ->> 'store_id')::uuid;
+  if (v_res ->> 'created')::boolean is not true then raise exception 'ASSERT: store not created'; end if;
+
+  -- Closing is a status flip; the row survives for history.
+  perform public.upsert_store(v_id, null, null, null, null, false);
+
+  -- Another tenant's store id is indistinguishable from a missing one.
+  begin
+    perform public.upsert_store('bbbbbbbb-0000-4000-8000-000000000009', 'Steal');
+    raise exception 'ASSERT: cross-tenant store update allowed';
+  exception when sqlstate '22023' then null;
+  end;
+
+  execute 'reset role';
+  if (select is_active from public.stores where id = v_id) then
+    raise exception 'ASSERT: store was not closed';
+  end if;
+  if (select name from public.stores where id = v_id) <> 'Karelibaug Counter' then
+    raise exception 'ASSERT: closing the store overwrote its name';
+  end if;
+  select count(*) into v_n from public.audit_logs
+   where action in ('store.created', 'store.updated') and target_id = v_id::text;
+  if v_n <> 2 then raise exception 'ASSERT: store changes not audited (% rows)', v_n; end if;
+  if (select name from public.stores where id = 'bbbbbbbb-0000-4000-8000-000000000009')
+     = 'Steal' then
+    raise exception 'ASSERT: the other tenant''s store was renamed';
+  end if;
+end $$;
+
+-- CASE: SET3 notification preferences — per profile, security never mutable
+do $$
+declare v_n int; v_cats text;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  perform public.set_notification_preferences(
+    'aaaaaaaa-0000-4000-8000-000000000001', array['stock', 'rule']);
+  select array_to_string(muted_categories, ',') into v_cats
+    from public.notification_preferences
+   where profile_id = '33333333-3333-4333-8333-333333333333';
+  if v_cats <> 'stock,rule' then raise exception 'ASSERT: preferences not stored (%)', v_cats; end if;
+
+  -- Security alerts exist to surface abuse; nobody gets to hide them.
+  begin
+    perform public.set_notification_preferences(
+      'aaaaaaaa-0000-4000-8000-000000000001', array['security']);
+    raise exception 'ASSERT: security notifications were muted';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform public.set_notification_preferences(
+      'aaaaaaaa-0000-4000-8000-000000000001', array['not-a-category']);
+    raise exception 'ASSERT: unknown category accepted';
+  exception when sqlstate '22023' then null;
+  end;
+
+  -- A non-member cannot set preferences for a business at all.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.set_notification_preferences(
+      'aaaaaaaa-0000-4000-8000-000000000001', array['stock']);
+    raise exception 'ASSERT: outsider set preferences for another tenant';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Preferences are private to their owner.
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select count(*) into v_n from public.notification_preferences;
+  if v_n <> 0 then raise exception 'ASSERT: owner can read the cashier''s preferences'; end if;
+
+  -- Re-running replaces rather than duplicating.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  perform public.set_notification_preferences('aaaaaaaa-0000-4000-8000-000000000001', array['points']);
+  execute 'reset role';
+  select count(*) into v_n from public.notification_preferences
+   where profile_id = '33333333-3333-4333-8333-333333333333';
+  if v_n <> 1 then raise exception 'ASSERT: preferences duplicated'; end if;
+end $$;
+
+-- CASE: SET4 settings surface — grants and anonymous denial
+do $$
+begin
+  execute 'reset role';
+  if has_function_privilege('anon', 'public.update_business_profile(text, text, text, text, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.upsert_store(uuid, text, text, text, text, boolean, text, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.attach_catalogue_image(uuid, uuid, text, text, text, bigint, integer, integer, text, boolean)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.set_notification_preferences(uuid, text[])', 'EXECUTE') then
+    raise exception 'ASSERT: anon can call a settings RPC';
+  end if;
+  if has_table_privilege('anon', 'public.catalogue_images', 'SELECT')
+     or has_table_privilege('anon', 'public.notification_preferences', 'SELECT') then
+    raise exception 'ASSERT: anon can read settings tables';
+  end if;
+  if has_table_privilege('authenticated', 'public.catalogue_images', 'INSERT')
+     or has_table_privilege('authenticated', 'public.catalogue_images', 'DELETE')
+     or has_table_privilege('authenticated', 'public.notification_preferences', 'INSERT') then
+    raise exception 'ASSERT: settings tables are directly writable';
+  end if;
+end $$;

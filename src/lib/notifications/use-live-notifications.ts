@@ -77,6 +77,10 @@ export function useLiveNotifications(audience: NotificationAudience) {
     configured ? "connecting" : "disabled"
   );
   const [loading, setLoading] = React.useState(configured);
+  // Read-side muting (Slice 8). A notification row is shared by everyone
+  // entitled to see it, so a personal preference can only ever filter what is
+  // displayed — never what is emitted.
+  const [muted, setMuted] = React.useState<Set<string>>(new Set());
 
   // Kept in a ref so the Realtime callback never closes over a stale list and
   // never needs to be re-subscribed when the list changes.
@@ -93,7 +97,7 @@ export function useLiveNotifications(audience: NotificationAudience) {
     // Two RLS-filtered reads: the events this profile may see, and this
     // profile's own read rows. The join is done here because the read table
     // is deliberately personal and not exposed through the event query.
-    const [notifRes, readRes] = await Promise.all([
+    const [notifRes, readRes, prefRes] = await Promise.all([
       supabase
         .from("notifications")
         .select(
@@ -103,9 +107,16 @@ export function useLiveNotifications(audience: NotificationAudience) {
         .order("created_at", { ascending: false })
         .limit(PAGE_SIZE),
       supabase.from("notification_reads").select("notification_id"),
+      supabase.from("notification_preferences").select("muted_categories"),
     ]);
 
     if (notifRes.error) return false;
+
+    const mutedSet = new Set<string>();
+    for (const row of (prefRes.data ?? []) as { muted_categories?: string[] }[]) {
+      for (const c of row.muted_categories ?? []) mutedSet.add(c);
+    }
+    setMuted(mutedSet);
 
     const readIds = new Set(
       ((readRes.data ?? []) as { notification_id: string }[]).map((r) => r.notification_id)
@@ -194,7 +205,13 @@ export function useLiveNotifications(audience: NotificationAudience) {
     };
   }, [configured, load]);
 
-  const unreadCount = React.useMemo(() => countUnread(items), [items]);
+  // Muted categories are hidden from the list AND the badge, so the bell
+  // never advertises something the user chose not to see.
+  const visible = React.useMemo(
+    () => items.filter((n) => !muted.has(n.category)),
+    [items, muted]
+  );
+  const unreadCount = React.useMemo(() => countUnread(visible), [visible]);
 
   /** Optimistic, then reconciled. A refusal rolls the single flag back. */
   const markRead = React.useCallback(
@@ -222,7 +239,7 @@ export function useLiveNotifications(audience: NotificationAudience) {
   }, [audience, supabase]);
 
   return {
-    items,
+    items: visible,
     unreadCount,
     connection,
     loading,

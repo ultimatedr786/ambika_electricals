@@ -63,6 +63,8 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `loyalty_rule_versions` SELECT | **only the version in force right now** | whole history | whole history | whole history | immutable economics + effective window. A trigger rejects any UPDATE touching `earn_*`, `point_value_paise`, `min_spend_paise`, `points_expiry_days`, `effective_from` or `version`, and refuses to reopen a closed window; only `effective_to`/`status`/`notes` move. Deletion is blocked by grants (it must still cascade with its business) |
 | `notifications` SELECT | **own membership's** customer notifications only | business ones at/above their role, **and only for stores they are assigned to** | ← same (role floor applies) | ← same | the event row, shared by everyone entitled to it. Written **only by triggers**; no INSERT/UPDATE/DELETE grants for any API role. Unique `(business_id, dedupe_key)` makes replay impossible at the storage layer |
 | `notification_reads` SELECT | own rows only | own rows only | own rows only | own rows only | per-profile read state, so one low-stock alert can be read independently by three cashiers. Writes are RPC-only; a row can never be forged for another profile. **Not published to Realtime** — read state is personal and high-frequency |
+| `catalogue_images` SELECT | active **rewards'** images of businesses they belong to | whole business | whole business | whole business | product images stay staff-side until a customer catalogue exists. Writes RPC-only; `path` is CHECKed to start with `business_id/`, and one partial unique index per owner guarantees a single thumbnail |
+| `notification_preferences` SELECT | own row | own row | own row | own row | per-profile muting; `security` can never be muted (CHECK **and** RPC). Read-side only — a shared notification row cannot be suppressed per user at emission |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -121,6 +123,11 @@ in `src/lib/supabase/admin.ts`).
 | `mark_all_notifications_read` | any authenticated recipient | optional audience filter keeps the business bell and the customer bell independent; returns how many rows actually changed, so a second call is a truthful 0 | — |
 | `unread_notification_count` | any authenticated recipient | one round trip for the badge instead of fetching the list | — |
 | `notify_emit` | — internal — | EXECUTE revoked from every API role; the single insertion point for all six emitters. Returns null on a duplicate instead of raising, because it runs inside somebody else's transaction and must never abort the sale/redemption/stock move that produced it | — |
+| `attach_catalogue_image` | manager+ of the owning business | resolves the business from the product/reward row (never from input); MIME allowlist, 5 MB cap, bucket must match the owner kind, path must start with the caller's own `business_id` and may not contain `..`; first image becomes the thumbnail and the previous one is stood down **before** the insert (the unique index is real) | `catalogue_image.attached` |
+| `set_primary_catalogue_image` / `detach_catalogue_image` / `set_catalogue_image_alt` | manager+ | detach returns the bucket/path so the action can delete the object, and promotes a survivor so an owner never has images but no thumbnail | `catalogue_image.primary_set` / `.detached` |
+| `update_business_profile` | **owner only** | validates name length, support email shape and the 15-character GSTIN pattern (a wrong GSTIN is a compliance problem, not a typo) | `business.profile_updated` (previous values under `from`) |
+| `upsert_store` | **owner only** | create or update; closing is `is_active = false`, never a delete, because sales/stock/assignments point at it. Another tenant's store id returns the same `store_not_found` as a missing one, so ids cannot be probed | `store.created` / `store.updated` |
+| `set_notification_preferences` | any member of the business (staff or customer) | category allowlist; refuses `security`; upsert so re-running replaces rather than duplicating | — |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
@@ -141,8 +148,8 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **101 cases, 101 passed** (Step 2 suite executed 2026-09-05;
-ledger + sales + inventory + rewards/redemptions + membership-QR + loyalty-rule + notification suites 2026-09-06, against PostgreSQL 18.4 with
+`scripts/rls-check/10_assertions.sql` — **109 cases, 109 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales + inventory + rewards/redemptions + membership-QR + loyalty-rule + notification + storage/settings suites 2026-09-06, against PostgreSQL 18.4 with
 the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
@@ -246,12 +253,25 @@ the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
   swallows it rather than aborting its caller. Low stock alerts only where a reorder level is
   configured and only on the crossing (never repeatedly below the line), manager- and store-scoped.
   Realtime exposure is limited to the event table; `anon` has no SELECT and no EXECUTE.
+- **ST1–ST4 / SET1–SET4** storage + settings: uploads are manager+ and every validation bites —
+  SVG, oversized files, a path under another tenant's folder, `..` traversal, a product filed in
+  the reward bucket and an ownerless image are all refused, and no rejected attempt leaves a row.
+  Cashiers may look but not touch; another tenant sees nothing and can change nothing; customers
+  see active rewards' images but not product images; even the owner cannot INSERT a row directly.
+  Exactly one thumbnail survives a second upload (proven against the partial unique index, not
+  just the RPC), alt text is editable and trimmed, and detaching the thumbnail promotes a survivor
+  while returning the storage coordinates so the object can be deleted too. Settings: identity is
+  owner-only with name/email/GSTIN validation and before-and-after auditing; stores are owner-only,
+  closing is a status flip that preserves the name, and another tenant's store id is
+  indistinguishable from a missing one; notification preferences are per profile, private, refuse
+  `security` and unknown categories, reject outsiders and replace rather than duplicate. `anon` can
+  call none of it.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 264 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 303 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
 additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
 harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/lives_ok/throws_ok/finish):
-**264/264 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
+**303/303 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
 (the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices
@@ -261,7 +281,16 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/liv
   `notification_reads` is deliberately unpublished — read state is personal, high-frequency and
   already known to the tab that changed it. Replica identity stays at the default (primary key);
   `FULL` would ship unfiltered old rows to subscribers. No other table broadcasts.
-- No Storage buckets yet (product image migration is a later slice).
+- Storage: buckets `product-images` and `reward-images` are **public-read on purpose**. A
+  catalogue photo is shown to every customer browsing the rewards store, so signing every URL
+  would buy no confidentiality while breaking CDN caching and expiring in users' faces. What
+  needs guarding is write, and that is locked twice: Storage RLS allows INSERT/UPDATE/DELETE only
+  to manager+ of the business named by the **first path segment** (so the
+  `<business_id>/<owner_id>/<uuid>.<ext>` convention is a security boundary, not filing), and the
+  metadata row can only be created by `attach_catalogue_image`, which re-derives everything. An
+  object with no metadata row is invisible to the application. The upload action additionally
+  sniffs magic bytes and refuses when they disagree with the declared type — a `Content-Type`
+  header and a file extension are both attacker-controlled.
 - Manager scoped permissions (e.g. managing staff for assigned stores) are **not** granted by
   default — “never owner-only controls unless explicitly granted” (spec 2.x). Extending managers
   means adding an explicit policy/RPC guard in a reviewed migration.
@@ -338,4 +367,11 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/liv
   a configured reorder level — a busy Saturday must not bury the notification centre in the same
   alert. Deferred: web push and email fan-out (§5 explicitly keeps push separate), per-user
   notification preferences (§6 owns settings), digesting/grouping, and a retention sweeper.
+- Settings scope: §6 says "do not create broad untested settings pages", so the live surface is
+  exactly five entry points — identity, stores, the loyalty rule (its own panel), notification
+  preferences, and a link to the existing staff screen rather than a second one. Manager-visible
+  controls that a manager may not use are rendered **disabled with a reason** instead of hidden,
+  so the UI does not imply a permission the server will refuse. Deferred: tier configuration,
+  campaign settings, per-store notification routing, and image cropping/resizing (uploads are
+  stored as sent; width/height columns exist for when a resize step lands).
 
