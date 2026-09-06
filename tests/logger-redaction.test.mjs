@@ -9,8 +9,13 @@ import { redact } from "../src/lib/observability/redact.ts";
  * and value shapes) and, importantly, that redaction survives nesting.
  */
 
+// Fabricated fixtures: a JWT-shaped string whose payload says `service_role`,
+// and a Supabase-shaped secret key. Neither has ever been valid anywhere.
+// They are marked for the repository secret scanner, which correctly flags
+// them by shape — the whole point of these tests is that the redactor treats
+// values like these as credentials.
 const JWT =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.c2lnbmF0dXJlSGVyZQ";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.c2lnbmF0dXJlSGVyZQ"; // secret-scan-ignore
 const QR = "RWD1.0123456789ABCDEF.ZYXWVTSRQPNMKJHGFEDCBA9876";
 
 test("keys that name a credential are redacted whatever they contain", () => {
@@ -26,7 +31,7 @@ test("keys that name a credential are redacted whatever they contain", () => {
 });
 
 test("credential-shaped values are redacted whatever the key is called", () => {
-  const out = redact({ data: JWT, payload: QR, note: "sb_secret_abcdefghijklmnop" });
+  const out = redact({ data: JWT, payload: QR, note: "sb_secret_abcdefghijklmnop" }); // secret-scan-ignore
   assert.equal(out.data, "[REDACTED:jwt]");
   assert.equal(out.payload, "[REDACTED:qr-token]");
   assert.equal(out.note, "[REDACTED:supabase-key]");

@@ -77,6 +77,7 @@ image rather than the local stub runner.
 
 | Document | Read it when |
 | --- | --- |
+| `MVP_HANDOFF.md` | **Start here** — what was delivered, test results, owner tasks, deferred scope |
 | `FINAL_MVP_LAUNCH_COMPLETION.md` | You want the scope this MVP was built to |
 | `OPERATIONS.md` | Running it: health checks, logging, backups, rollback, CI |
 | `RELEASE_CHECKLISTS.md` | Shipping it: staging/UAT and production |
