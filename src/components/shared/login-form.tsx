@@ -13,7 +13,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PasswordField } from "@/components/shared/password-field";
 import { useServices } from "@/lib/services";
 import { createClient } from "@/lib/supabase/client";
@@ -233,22 +232,43 @@ export function LoginForm({ next, error }: { next?: string | null; error?: strin
   return (
     <div className="space-y-5">
       {/* Role switch */}
-      <Tabs
-        value={mode}
-        onValueChange={(v) => {
-          setMode(v as Mode);
-          form.clearErrors();
-        }}
+      {/*
+        A segmented choice, not a tablist: these controls switch the sign-in
+        mode, they do not reveal tab panels. Rendering them as tabs made
+        `aria-controls` point at panels that do not exist (axe
+        `aria-valid-attr-value`), and told screen-reader users to look for
+        content that was never there. A radiogroup is what this actually is,
+        and arrow-key behaviour comes free from the native radios.
+      */}
+      <div
+        role="radiogroup"
+        aria-label="Account role"
+        className="grid w-full grid-cols-2 gap-1 rounded-lg bg-muted p-1"
       >
-        <TabsList className="grid w-full grid-cols-2" aria-label="Account role selection">
-          <TabsTrigger value="customer" className="gap-2">
-            <UserRound className="size-4" /> Customer
-          </TabsTrigger>
-          <TabsTrigger value="business" className="gap-2">
-            <Building2 className="size-4" /> Business
-          </TabsTrigger>
-        </TabsList>
-      </Tabs>
+        {([
+          { value: "customer", label: "Customer", Icon: UserRound },
+          { value: "business", label: "Business", Icon: Building2 },
+        ] as const).map(({ value, label, Icon }) => (
+          <button
+            key={value}
+            type="button"
+            role="radio"
+            aria-checked={mode === value}
+            onClick={() => {
+              setMode(value);
+              form.clearErrors();
+            }}
+            className={
+              "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 " +
+              (mode === value
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground")
+            }
+          >
+            <Icon className="size-4" aria-hidden /> {label}
+          </button>
+        ))}
+      </div>
 
       {mode === "business" && (
         <motion.div

@@ -57,6 +57,14 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `redemptions` SELECT | **own redemptions only** | whole business | whole business | whole business | writes RPC-only (`redeem_reward`/`collect_redemption`/`cancel_redemption`); lifecycle status flips — never deleted; collection codes stored **sha256 + last4 only** (§8.4) |
 | `redemption_items` SELECT | follows parent redemption (`EXISTS` into RLS-filtered `redemptions`) | ← same | ← same | ← same | reward name/points snapshot at redeem time |
 | `redemption_counters` | ✗ | ✗ | ✗ | ✗ | internal per-business `RDM-####` sequence, locked inside `redeem_reward`; no grants, no policies |
+| `membership_qr_tokens` | ✗ | ✗ | ✗ | ✗ | **no SELECT for anyone but `service_role`** — the row holds the salted sha256 verifier of a live checkout code; issue/verify/revoke happen entirely inside the definer RPCs |
+| `qr_verification_attempts` SELECT | ✗ | ✗ | whole business | whole business | security trail of every scan (success and failure). Append-only: no DML grants **and** a trigger that rejects UPDATE/DELETE even for postgres. Deliberately invisible to cashiers so the trail cannot be shoulder-audited at the counter |
+| `loyalty_rules` SELECT | own businesses (active membership) | whole business | whole business | whole business | the rule *series*; writes RPC-only (`set_loyalty_rule`) |
+| `loyalty_rule_versions` SELECT | **only the version in force right now** | whole history | whole history | whole history | immutable economics + effective window. A trigger rejects any UPDATE touching `earn_*`, `point_value_paise`, `min_spend_paise`, `points_expiry_days`, `effective_from` or `version`, and refuses to reopen a closed window; only `effective_to`/`status`/`notes` move. Deletion is blocked by grants (it must still cascade with its business) |
+| `notifications` SELECT | **own membership's** customer notifications only | business ones at/above their role, **and only for stores they are assigned to** | ← same (role floor applies) | ← same | the event row, shared by everyone entitled to it. Written **only by triggers**; no INSERT/UPDATE/DELETE grants for any API role. Unique `(business_id, dedupe_key)` makes replay impossible at the storage layer |
+| `notification_reads` SELECT | own rows only | own rows only | own rows only | own rows only | per-profile read state, so one low-stock alert can be read independently by three cashiers. Writes are RPC-only; a row can never be forged for another profile. **Not published to Realtime** — read state is personal and high-frequency |
+| `catalogue_images` SELECT | active **rewards'** images of businesses they belong to | whole business | whole business | whole business | product images stay staff-side until a customer catalogue exists. Writes RPC-only; `path` is CHECKed to start with `business_id/`, and one partial unique index per owner guarantees a single thumbnail |
+| `notification_preferences` SELECT | own row | own row | own row | own row | per-profile muting; `security` can never be muted (CHECK **and** RPC). Read-side only — a shared notification row cannot be suppressed per user at emission |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -64,9 +72,13 @@ supply (proven by tests A3/A6/A7).
 
 ## 3. Grant floor (belt & braces under the policies)
 
-`authenticated` receives only: SELECT on all tables (+ the narrow `profiles` column-update grant),
-INSERT/UPDATE on `stores` and `customer_memberships` — both row-gated by owner/manager(+staff)
-policies. `points_ledger` and `customer_points_balance` are SELECT-only at grant level; every
+`authenticated` receives only: SELECT on all tables (+ the narrow `profiles` column-update grant)
+and INSERT/UPDATE on `customer_memberships` (counter enrolment, row-gated by the staff policy).
+**`businesses.UPDATE` and `stores.INSERT/UPDATE` were revoked in
+`20260906200000_tighten_settings_grants.sql`** — once `update_business_profile` and `upsert_store`
+existed, the direct paths were a way to change tenant configuration without leaving an audit entry,
+and an audit trail with a legitimate bypass is not an audit trail. This was found by
+`scripts/ci/validate-migrations.mjs`, not by a human reading the grants. `points_ledger` and `customer_points_balance` are SELECT-only at grant level; every
 write path is an RPC. No DELETE grants exist anywhere. `anon` receives nothing; new tables default to
 no-grant (`ALTER DEFAULT PRIVILEGES … REVOKE`). `service_role` retains full access for trusted
 server operations and **must never appear in a browser bundle** (enforced by `server-only` imports
@@ -102,11 +114,37 @@ in `src/lib/supabase/admin.ts`).
 | `redeem_reward` | the member themself **or** staff+ | store-scoped staff confined to their stores; rolling-30-day limit; reserves the exact inventory row (store → pool → unlimited) and records `inventory_scope`; points spent through a `redeem` ledger entry (idempotent on `redemption:<id>`); the plaintext code is returned **once** (replays carry `code: null`); lock order *balance → inventory → counter* | `redemption.created` |
 | `collect_redemption` | staff+ | Crockford-normalizes the code (I/L/O → 1/1/0) then sha256-matches; lazy expiry marks + releases + audits and then **returns** `expired` (a raise would roll the marking back); debits exactly the reserved row | `redemption.collected` (+ `redemption.expired`) |
 | `cancel_redemption` | manager+ **or** the member themself | **reason required**; pending only; refunds with a compensating `adjust` entry (idempotent on `redemption-cancel:<id>`); releases the hold from exactly the reserved row; lazy expiry as in collect | `redemption.cancelled` (+ `redemption.expired`) |
+| `issue_membership_qr_token` | the signed-in customer | resolves the caller's own active membership (never a client-supplied one); TTL clamped 30–300 s (default 90); **10 issues per minute per membership** (`rate_limited`); minting revokes the previous live token (`revoke_reason = superseded`); only `sha256(salt‖secret)` is stored — the secret exists once, in the response | `membership_qr.issued` (selector + TTL only) |
+| `verify_membership_qr_token` | staff+ of the token's business | **authorization first**: business role, then store scoping (`store_not_in_business` / `store_forbidden`) — lifecycle detail is never revealed to someone who may not scan. Then constant-shape checks: malformed / unknown selector / wrong secret all return the same `qr_invalid`. Single use via a conditional `UPDATE … where consumed_at is null and revoked_at is null`, so concurrent scans cannot both win. **40 verifies per minute per staff profile.** Returns `{ok:false, reason}` instead of raising — see note below | `membership_qr.verified` / `membership_qr.verify_denied` / `membership_qr.verify_failed` / `membership_qr.rate_limited` + a `qr_verification_attempts` row on **every** branch |
+| `revoke_membership_qr_tokens` | the signed-in customer | "hide my QR" / lost device: revokes every live token of the caller's memberships, returns the count | `membership_qr.revoked` (one row per affected business, token count + reason, no selector) |
+| `set_loyalty_rule` | **owner only** | business resolved from the caller's own memberships (a supplied id can only disambiguate between businesses they already own); validates spend ₹1–₹1,00,000, points 0–1000, point value ≤ ₹100, non-negative minimum spend; **backdating refused** (it would re-price settled history) and no start beyond 365 days; locks the series, closes the open version at the new start and appends version N+1 — never rewrites | `loyalty_rule.version_created` (new economics + the previous version's under `from`) |
+| `current_loyalty_rule` | any authenticated reader | SECURITY INVOKER — RLS decides; returns the version in force now | — |
+| `active_loyalty_rule_version` | — internal — | EXECUTE revoked from every API role (like `ledger_post_entry`/`inventory_move`); resolves `effective_from <= at < coalesce(effective_to, infinity)` for the business's `default` series | — |
+| `loyalty_points_for` | any authenticated reader | pure evaluation of one version against an eligible amount: floors on exact paise, honours the minimum spend, returns 0 for an unknown version | — |
+| `create_sale` v3 | staff+ | Slice-3 semantics **plus**: the rate comes from `active_loyalty_rule_version(business, now())` instead of the dropped `businesses.earn_*` columns, and that version id is stamped on `sales.loyalty_rule_version_id`. A business with no rule fails closed (`loyalty_rule_missing`) | `sale.created` (+ `loyalty_rule_version` in metadata) |
+| `ledger_post_entry` v2 | — internal — | unchanged contract; every entry whose `source_id` is a sale inherits that sale's pinned rule version, so the void reversal is stamped too | — |
+| `mark_notification_read` | any authenticated recipient | authorizes through `can_see_notification` — the **same predicate as the RLS policy**, so a user can never mark read something they could not see; idempotent (`on conflict do nothing`) | — |
+| `mark_all_notifications_read` | any authenticated recipient | optional audience filter keeps the business bell and the customer bell independent; returns how many rows actually changed, so a second call is a truthful 0 | — |
+| `unread_notification_count` | any authenticated recipient | one round trip for the badge instead of fetching the list | — |
+| `notify_emit` | — internal — | EXECUTE revoked from every API role; the single insertion point for all six emitters. Returns null on a duplicate instead of raising, because it runs inside somebody else's transaction and must never abort the sale/redemption/stock move that produced it | — |
+| `attach_catalogue_image` | manager+ of the owning business | resolves the business from the product/reward row (never from input); MIME allowlist, 5 MB cap, bucket must match the owner kind, path must start with the caller's own `business_id` and may not contain `..`; first image becomes the thumbnail and the previous one is stood down **before** the insert (the unique index is real) | `catalogue_image.attached` |
+| `set_primary_catalogue_image` / `detach_catalogue_image` / `set_catalogue_image_alt` | manager+ | detach returns the bucket/path so the action can delete the object, and promotes a survivor so an owner never has images but no thumbnail | `catalogue_image.primary_set` / `.detached` |
+| `update_business_profile` | **owner only** | validates name length, support email shape and the 15-character GSTIN pattern (a wrong GSTIN is a compliance problem, not a typo) | `business.profile_updated` (previous values under `from`) |
+| `upsert_store` | **owner only** | create or update; closing is `is_active = false`, never a delete, because sales/stock/assignments point at it. Another tenant's store id returns the same `store_not_found` as a missing one, so ids cannot be probed | `store.created` / `store.updated` |
+| `set_notification_preferences` | any member of the business (staff or customer) | category allowlist; refuses `security`; upsert so re-running replaces rather than duplicating | — |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
 **server action**, which catches the typed error and writes the audit row through the admin client
 — with the real client IP, which SQL never sees. Accepted/succeeded operations are audited in-SQL.
+
+The QR slice takes the *other* branch of that same rule: `verify_membership_qr_token` must leave a
+security trail **and** feed a rate limiter, and both live in the rows it writes. A raise would roll
+them back, so verification failures **return** `{ok:false, reason}` and only a missing session
+raises (`authentication_required`, 28000). Every branch — invalid, expired, already-used, revoked,
+business mismatch, not authorized, rate limited — inserts a `qr_verification_attempts` row and an
+audit event **keyed by the selector only**; the secret half of the token is never logged, never
+audited and never stored in plaintext.
 
 Invitation expiry is enforced at every accept attempt (`expires_at < now()` ⇒ reject); the stored
 `status` stays `pending` and UIs derive “expired” from `expires_at` — no background sweeper needed
@@ -114,8 +152,8 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **78 cases, 78 passed** (Step 2 suite executed 2026-09-05;
-ledger + sales + inventory + rewards/redemptions suites 2026-09-06, against PostgreSQL 18.4 with
+`scripts/rls-check/10_assertions.sql` — **110 cases, 110 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales + inventory + rewards/redemptions + membership-QR + loyalty-rule + notification + storage/settings suites 2026-09-06, against PostgreSQL 18.4 with
 the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
@@ -172,19 +210,91 @@ the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
   count pending/collected only, so a cancellation frees the slot; idempotency replays return the
   stored redemption with `code: null`; customers see active rewards + their own redemptions while
   inventory/counters stay staff-internal; no DML grants — even owners write through RPCs only.
+- **QR1–QR8** membership QR: issuance returns an opaque `RWD1.<selector>.<secret>` payload that
+  contains no membership number, name, phone or points, is clamped to the 5-minute hard cap and is
+  stored only as `sha256(salt‖secret)` (verified against the issued secret in the test); the token
+  table is unreadable even to its owner's session (42501) and re-issuing supersedes the previous
+  code. An authorized cashier's scan resolves the right member, returns counter-safe fields only
+  (no email/phone/enrolment payload), is audited by selector with the secret provably absent from
+  `audit_logs`, and the same code is refused on replay (`qr_already_used`). Malformed, unknown and
+  tampered payloads all return the identical `qr_invalid` and are recorded as failed attempts —
+  while the genuine token still works afterwards, so failures never burn it. Expiry is enforced;
+  foreign-tenant owners and customers get `not_authorized`, store-scoped cashiers get
+  `store_forbidden` at an unassigned store and `store_not_in_business` for another tenant's store,
+  and **no denial consumes the token**. Customer revocation kills the live code
+  (`qr_revoked`) and the 10-per-minute issue limit trips. Grants: no SELECT/INSERT/UPDATE/DELETE
+  for API roles on either table, no `anon` EXECUTE on issue/verify. Attempts are append-only
+  (trigger refuses even postgres), visible to managers and invisible to cashiers.
+- **LR1–LR8** loyalty rule engine: every business (existing ones by backfill, new ones by an
+  AFTER INSERT trigger) starts on the launch policy — ₹100 → 10 pts, 1 pt = ₹0.10, no expiry — and
+  every sale plus every sale-linked ledger entry carries the version that priced it; the hard-coded
+  `businesses.earn_*` columns are gone. Rule changes are owner-only (manager, cashier, customer and
+  a foreign tenant's owner all get 42501, and a denied attempt writes no version). Invalid
+  configuration fails safely with nothing persisted: sub-₹1 or ₹1,00,000+ spend steps, >1000 or
+  negative points, missing rates, backdated starts and starts beyond a year are all refused (22023).
+  A valid edit appends v2, closes v1 at the new start (`superseded`, economics untouched), leaves
+  exactly one open window and audits before/after. History is frozen: the pre-change sale keeps v1
+  and its 125 points while the next sale earns 250 under v2, ledger entries inherit their sale's
+  version on both sides of the change, and a below-minimum sale earns nothing. Versions are
+  immutable even for `postgres` (economics, `effective_from` and reopening a closed window all
+  42501) and points expiry cannot be configured while no sweeper exists (23514). Tenancy holds: the
+  resolver never crosses businesses, staff read their own history, customers see only the version
+  in force, and even the owner cannot INSERT a rule directly or call the internal resolver. A
+  version scheduled for next week does not price today's sale — but does resolve on its date.
+- **NT1–NT7** notifications: the six emitters fire from the facts themselves — a sale's points
+  award notifies the customer once with a payload reference, a rule change notifies the business
+  (but the launch policy installed at signup does not), and an invitation notifies the owner.
+  Authorization is per audience and per role: a customer sees only their own membership's rows and
+  no business events, one customer cannot read another's, a cashier sees neither customer rows nor
+  owner-scoped ones, and a satellite-store alert is invisible to the main-store cashier while the
+  assigned cashier does see it. Cross-tenant reads return nothing and cross-tenant mark-read is
+  42501 — the RPC reuses the RLS predicate, so the two cannot disagree. Nobody writes directly:
+  owner INSERTs and direct `notify_emit` calls are both 42501. Read state is personal, persistent
+  and idempotent: marking read twice leaves one row, the owner cannot see the cashier's read rows
+  or forge one, mark-all is audience-scoped and reports 0 on a second run, and clearing the
+  business bell leaves the customer bell untouched. Replays cannot duplicate: an idempotency-key
+  sale replay emits nothing new, a duplicate `dedupe_key` is a unique violation, and `notify_emit`
+  swallows it rather than aborting its caller. Low stock alerts only where a reorder level is
+  configured and only on the crossing (never repeatedly below the line), manager- and store-scoped.
+  Realtime exposure is limited to the event table; `anon` has no SELECT and no EXECUTE.
+- **ST1–ST4 / SET1–SET4** storage + settings: uploads are manager+ and every validation bites —
+  SVG, oversized files, a path under another tenant's folder, `..` traversal, a product filed in
+  the reward bucket and an ownerless image are all refused, and no rejected attempt leaves a row.
+  Cashiers may look but not touch; another tenant sees nothing and can change nothing; customers
+  see active rewards' images but not product images; even the owner cannot INSERT a row directly.
+  Exactly one thumbnail survives a second upload (proven against the partial unique index, not
+  just the RPC), alt text is editable and trimmed, and detaching the thumbnail promotes a survivor
+  while returning the storage coordinates so the object can be deleted too. Settings: identity is
+  owner-only with name/email/GSTIN validation and before-and-after auditing; stores are owner-only,
+  closing is a status flip that preserves the name, and another tenant's store id is
+  indistinguishable from a missing one; notification preferences are per profile, private, refuse
+  `security` and unknown categories, reject outsiders and replace rather than duplicate. `anon` can
+  call none of it.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 155 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 309 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
 additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
-harness database with stubs for the pgTAP subset it uses (plan/is/ok/lives_ok/throws_ok/finish):
-**155/155 passed** (2026-09-06). That run also surfaced a pre-existing off-by-two `plan()` count
+harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/lives_ok/throws_ok/finish):
+**309/309 passed** (2026-09-06). CI additionally runs this file against the **real pgTAP extension** on the PostgreSQL image Supabase ships, so the stub runner is no longer the only evidence. An earlier run also surfaced a pre-existing off-by-two `plan()` count
 (the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices
 
-- No Realtime publication entries for these tables — nothing broadcasts auth/tenancy data yet;
-  realtime authorization is designed with its own slice.
-- No Storage buckets yet (product image migration is a later slice).
+- Realtime: **only `public.notifications` is published**, and Supabase applies its SELECT policy
+  per subscriber, so a socket physically cannot deliver another tenant's (or another store's) row.
+  `notification_reads` is deliberately unpublished — read state is personal, high-frequency and
+  already known to the tab that changed it. Replica identity stays at the default (primary key);
+  `FULL` would ship unfiltered old rows to subscribers. No other table broadcasts.
+- Storage: buckets `product-images` and `reward-images` are **public-read on purpose**. A
+  catalogue photo is shown to every customer browsing the rewards store, so signing every URL
+  would buy no confidentiality while breaking CDN caching and expiring in users' faces. What
+  needs guarding is write, and that is locked twice: Storage RLS allows INSERT/UPDATE/DELETE only
+  to manager+ of the business named by the **first path segment** (so the
+  `<business_id>/<owner_id>/<uuid>.<ext>` convention is a security boundary, not filing), and the
+  metadata row can only be created by `attach_catalogue_image`, which re-derives everything. An
+  object with no metadata row is invisible to the application. The upload action additionally
+  sniffs magic bytes and refuses when they disagree with the declared type — a `Content-Type`
+  header and a file extension are both attacker-controlled.
 - Manager scoped permissions (e.g. managing staff for assigned stores) are **not** granted by
   default — “never owner-only controls unless explicitly granted” (spec 2.x). Extending managers
   means adding an explicit policy/RPC guard in a reviewed migration.
@@ -221,3 +331,61 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/lives_ok/th
   `reward_inventory` row reserved at redeem time so collect/cancel never guess candidate rows.
   Monthly limits are a rolling-30-day window counting pending/collected only. The customer-facing
   *products* catalogue view is still deferred (customers see rewards, not stock).
+- Membership QR decisions: the payload is a **capability, not an identifier** — a bearer token with
+  a 90-second life and a single use, so a screenshot, a shoulder-surfed photo or a shared chat
+  message is worthless within seconds. Selector/secret split (rather than a signed JWT) keeps the
+  verification a single indexed lookup, keeps the secret out of the database entirely and makes
+  revocation instant; there is no signing key to rotate or leak. Both halves use Crockford base-32
+  and the RPC normalizes I/L/O the way `collect_redemption` already does, so a code read aloud at
+  the counter still verifies. Deliberately **not** in this slice: real QR image encoding and camera
+  decoding (capture stays simulated per the MVP scope — staff paste or key the code, and manual
+  member lookup remains the fallback), offline/queued verification, and a sweeper for consumed
+  rows (they are small, indexed by `expires_at` and useful evidence; retention lands with the
+  backup/retention document).
+- Loyalty rule engine decisions: the versions table is the **only** source of truth — the
+  `businesses.earn_spend_paise` / `earn_points` columns were backfilled into version 1 and then
+  dropped in the same migration, so there is no second place a rate can hide. Supersession is
+  modelled as a closed `[effective_from, effective_to)` window rather than a boolean `is_active`
+  flag: a flag cannot answer "what rate applied on 14 August?", and answering that question is the
+  entire reason sales carry a version id. Backdating is refused rather than supported — a
+  retroactive rate would contradict points that have already been paid out and possibly spent;
+  corrections belong in `adjust_points`, where they are visible in the ledger. Only `spend_earn`
+  is evaluated: the enum names the future models (`tier_multiplier`, `category_bonus`,
+  `campaign_bonus`) so the UI can show them as explicitly future, and a CHECK constraint stops one
+  being configured before any code evaluates it. `points_expiry_days` exists but is CHECKed to null
+  for the whole launch — no expiry sweeper exists, and a configurable expiry with no process behind
+  it is a promise the system would silently break. Deferred: per-store and per-category rule
+  series (the tables are already keyed for them), rule simulation/preview against past sales, and
+  bonus-points stacking (`sales.bonus_points` stays 0).
+- Notification decisions: the event and the read state are **separate tables** because a low-stock
+  alert is one fact that three cashiers read independently — a boolean on the event row could not
+  represent that, and two sessions marking it read would clobber each other. Marking read is
+  therefore an INSERT of your own row, never an UPDATE of shared state. Emission is by **trigger,
+  not by editing the eleven RPCs** that cause these events: the trigger fires in the same
+  transaction, so a rolled-back sale leaves no phantom alert and any future code path that writes
+  the same row still notifies — and the tested RPC bodies stay untouched (the rule-engine slice
+  showed what reimplementing a working function costs). De-duplication is structural rather than
+  best-effort: every emitter computes a deterministic `dedupe_key` and inserts
+  `on conflict do nothing`, which is why "a reconnect does not duplicate activity" is a database
+  property with a test, not a promise about client code. Low-stock fires only on the *crossing* of
+  a configured reorder level — a busy Saturday must not bury the notification centre in the same
+  alert. Deferred: web push and email fan-out (§5 explicitly keeps push separate), per-user
+  notification preferences (§6 owns settings), digesting/grouping, and a retention sweeper.
+- Settings scope: §6 says "do not create broad untested settings pages", so the live surface is
+  exactly five entry points — identity, stores, the loyalty rule (its own panel), notification
+  preferences, and a link to the existing staff screen rather than a second one. Manager-visible
+  controls that a manager may not use are rendered **disabled with a reason** instead of hidden,
+  so the UI does not imply a permission the server will refuse. Deferred: tier configuration,
+  campaign settings, per-store notification routing, and image cropping/resizing (uploads are
+  stored as sent; width/height columns exist for when a resize step lands).
+- Trigger functions are not client-callable. PostgreSQL grants EXECUTE to PUBLIC on every new
+  function, so `notify_on_*`, the `*_no_mutation` guards, `install_default_loyalty_rule` and the
+  `*_insert_check` functions were all reachable by `anon` and `authenticated`. Calling one raises
+  `0A000` before its body runs, so this was never exploitable — but it was inconsistent with the
+  revoke discipline applied to `ledger_post_entry`, `inventory_move`, `notify_emit` and
+  `active_loyalty_rule_version`, and harmless surface is how surface accumulates.
+  `20260906210000_revoke_trigger_function_execute.sql` revokes it, and
+  `scripts/ci/validate-migrations.mjs` now fails the build if a future migration reintroduces it.
+  Case HD1 proves both halves: nothing returning `trigger` is executable by an API role, and the
+  notification emitter, the ledger append-only guard and the rule immutability guard all still fire.
+

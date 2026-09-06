@@ -5,8 +5,11 @@ import { cn } from "@/lib/utils";
 
 const Slider = React.forwardRef<
   React.ElementRef<typeof SliderPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
->(({ className, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root> & {
+    /** One name per thumb. A range slider has two, and "Slider" twice is useless. */
+    thumbLabels?: string[];
+  }
+>(({ className, thumbLabels, ...props }, ref) => (
   <SliderPrimitive.Root ref={ref} className={cn("relative flex w-full touch-none select-none items-center", className)} {...props}>
     <SliderPrimitive.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-secondary">
       <SliderPrimitive.Range className="absolute h-full bg-primary" />
@@ -14,6 +17,14 @@ const Slider = React.forwardRef<
     {(props.value ?? props.defaultValue ?? [0]).map((_, i) => (
       <SliderPrimitive.Thumb
         key={i}
+        // Named so a screen reader announces which end of the range has focus
+        // (WCAG 4.1.2, axe `aria-input-field-name`).
+        aria-label={
+          thumbLabels?.[i] ??
+          (((props.value ?? props.defaultValue ?? [0]).length > 1)
+            ? i === 0 ? "Minimum value" : "Maximum value"
+            : "Value")
+        }
         className="block size-4 rounded-full border-2 border-primary bg-background shadow transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none"
       />
     ))}

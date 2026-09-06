@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { InstallAppAction } from "@/components/shared/install-app-action";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -116,6 +117,10 @@ export default function ProfilePage() {
               <SelectItem value="system">System</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+        {/* Install stays reachable here instead of as a repeating popup. */}
+        <div className="mt-4 border-t pt-4">
+          <InstallAppAction />
         </div>
       </Card>
 

@@ -14,8 +14,11 @@ import { relativeTime } from "@/lib/utils";
  *
  * Everything comes straight from RLS-filtered reads: `customer_memberships`
  * rows linked to the viewer's profile, the `customer_points_balance` cache
- * for display and the append-only `points_ledger` for history. Launch policy:
- * ₹100 spent → 10 points, 1 point = ₹0.10, no expiry.
+ * for display and the append-only `points_ledger` for history.
+ *
+ * The earning policy shown here is read from the versioned rule engine
+ * (Slice 6), not hard-coded — customers may see the version in force right
+ * now, never the history of what the business used to pay out.
  */
 
 interface LedgerEntry {
@@ -27,6 +30,15 @@ interface LedgerEntry {
   createdAt: string;
 }
 
+interface LoyaltyRule {
+  version: number;
+  earnSpendPaise: number;
+  earnPoints: number;
+  pointValuePaise: number;
+  minSpendPaise: number;
+  pointsExpiryDays: number | null;
+}
+
 interface LiveMembership {
   id: string;
   businessId: string;
@@ -34,6 +46,19 @@ interface LiveMembership {
   membershipNo: string;
   balance: { current: number; earned: number; redeemed: number } | null;
   entries: LedgerEntry[];
+  rule: LoyaltyRule | null;
+}
+
+const rupees = (paise: number) =>
+  (paise / 100).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+
+/** How the launch policy reads when a business somehow has no rule row yet. */
+function describeRule(rule: LoyaltyRule | null): string {
+  if (!rule) return "Earning policy unavailable right now";
+  const expiry =
+    rule.pointsExpiryDays === null ? "no expiry" : `points expire after ${rule.pointsExpiryDays} days`;
+  const min = rule.minSpendPaise > 0 ? ` · min spend ₹${rupees(rule.minSpendPaise)}` : "";
+  return `₹${rupees(rule.earnSpendPaise)} → ${rule.earnPoints} pts · 1 pt = ₹${rupees(rule.pointValuePaise)} · ${expiry}${min}`;
 }
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -83,7 +108,7 @@ export function LivePointsCard() {
 
       const memIds = mems.map((m) => m.id);
       const businessIds = [...new Set(mems.map((m) => m.business_id))];
-      const [balRes, ledgerRes, bizRes] = await Promise.all([
+      const [balRes, ledgerRes, bizRes, ruleRes] = await Promise.all([
         supabase
           .from("customer_points_balance")
           .select("customer_membership_id, current_points, lifetime_earned, lifetime_redeemed")
@@ -95,6 +120,13 @@ export function LivePointsCard() {
           .order("id", { ascending: false })
           .limit(12),
         supabase.from("businesses").select("id, name").in("id", businessIds),
+        // RLS returns only the version in force right now for these businesses.
+        supabase
+          .from("loyalty_rule_versions")
+          .select(
+            "business_id, version, earn_spend_paise, earn_points, point_value_paise, min_spend_paise, points_expiry_days"
+          )
+          .in("business_id", businessIds),
       ]);
 
       const balances = new Map(
@@ -105,6 +137,19 @@ export function LivePointsCard() {
       );
       const bizNames = new Map(
         ((bizRes.data ?? []) as { id: string; name: string }[]).map((b) => [b.id, b.name])
+      );
+      const rules = new Map<string, LoyaltyRule>(
+        ((ruleRes.data ?? []) as Record<string, unknown>[]).map((r) => [
+          String(r.business_id),
+          {
+            version: Number(r.version),
+            earnSpendPaise: Number(r.earn_spend_paise),
+            earnPoints: Number(r.earn_points),
+            pointValuePaise: Number(r.point_value_paise),
+            minSpendPaise: Number(r.min_spend_paise),
+            pointsExpiryDays: r.points_expiry_days == null ? null : Number(r.points_expiry_days),
+          },
+        ])
       );
       const entriesByMember = new Map<string, LedgerEntry[]>();
       for (const e of ((ledgerRes.data ?? []) as {
@@ -137,6 +182,7 @@ export function LivePointsCard() {
                 }
               : null,
             entries: entriesByMember.get(m.id) ?? [],
+            rule: rules.get(m.business_id) ?? null,
           };
         })
       );
@@ -200,7 +246,8 @@ export function LivePointsCard() {
               <span className="ml-auto font-mono text-xs font-normal text-muted-foreground">{m.membershipNo}</span>
             </CardTitle>
             <p className="text-xs text-muted-foreground">
-              {m.businessName} · launch policy ₹100 → 10 pts · 1 pt = ₹0.10 · no expiry
+              {m.businessName} · {describeRule(m.rule)}
+              {m.rule && <span className="ml-1 opacity-70">(rule v{m.rule.version})</span>}
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -208,7 +255,9 @@ export function LivePointsCard() {
               <div className="rounded-xl bg-muted/40 p-3 text-center">
                 <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Balance</p>
                 <p className="text-xl font-semibold">{m.balance?.current ?? 0} pts</p>
-                <p className="text-[11px] text-muted-foreground">≈ ₹{((m.balance?.current ?? 0) / 10).toFixed(2)}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  ≈ ₹{rupees((m.balance?.current ?? 0) * (m.rule?.pointValuePaise ?? 10))}
+                </p>
               </div>
               <div className="rounded-xl bg-muted/40 p-3 text-center">
                 <p className="flex items-center justify-center gap-1 text-[11px] uppercase tracking-wider text-muted-foreground">

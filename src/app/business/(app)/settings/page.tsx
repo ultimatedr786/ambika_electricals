@@ -14,6 +14,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
+import { InstallAppAction } from "@/components/shared/install-app-action";
+import { LiveLoyaltyRulePanel } from "@/components/business/live-loyalty-rule-panel";
+import { LiveBusinessSettingsPanel } from "@/components/business/live-business-settings-panel";
+import { isDemoDevToolsEnabled } from "@/lib/auth/env";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { tiers } from "@/lib/mock-data/business";
@@ -23,6 +27,9 @@ export default function SettingsPage() {
   const { reset } = useStore();
   const { business } = useServices();
   const [resetOpen, setResetOpen] = React.useState(false);
+  // Reset-demo-data is a development/preview control only — never a
+  // production affordance (MVP hotfix §"Remove visible Demo Mode").
+  const devTools = isDemoDevToolsEnabled();
 
   const [profile, setProfile] = React.useState({
     name: business.name, owner: business.ownerName, gst: business.gst,
@@ -44,7 +51,11 @@ export default function SettingsPage() {
           <TabsTrigger value="appearance">Appearance</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="business" className="mt-4">
+        <TabsContent value="business" className="mt-4 space-y-4">
+          {/* Real, role-authorized settings. Renders only when Supabase is
+              configured; the prototype card below stays for demo mode. */}
+          <LiveBusinessSettingsPanel />
+
           <Card className="p-5">
             <h2 className="flex items-center gap-2 text-sm font-semibold"><Building2 className="size-4 text-muted-foreground" aria-hidden /> Business profile</h2>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -65,6 +76,10 @@ export default function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="loyalty" className="mt-4 space-y-4">
+          {/* Live, versioned rule engine — renders only when Supabase is
+              configured; the prototype card below stays for demo mode. */}
+          <LiveLoyaltyRulePanel />
+
           <Card className="p-5">
             <h2 className="flex items-center gap-2 text-sm font-semibold"><Coins className="size-4 text-muted-foreground" aria-hidden /> Earning &amp; redemption</h2>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -74,7 +89,7 @@ export default function SettingsPage() {
               <div className="rounded-lg border border-dashed p-3">
                 <p className="text-sm font-medium">Points expiry</p>
                 <p className="mt-0.5 text-[13px] text-muted-foreground">
-                  None — points never expire under the launch loyalty policy.
+                  None. Points expiry is part of the live loyalty rule, and no expiry process runs at launch.
                 </p>
               </div>
             </div>
@@ -83,7 +98,7 @@ export default function SettingsPage() {
               <p className="font-medium">Current earn model</p>
               <p className="mt-1 text-muted-foreground">
                 A member spending {formatINR(earn.spend)} earns <span className="font-medium text-foreground">{earn.points} points</span>, multiplied by their tier.
-                1 point ≈ {formatINR(earn.pointValue)}, so {earn.minRedeem} points is worth about {formatINR(Math.round(earn.minRedeem * earn.pointValue))}.
+                1 point ≈ ₹{earn.pointValue.toFixed(2)}, so {earn.minRedeem} points is worth about {formatINR(Math.round(earn.minRedeem * earn.pointValue))}.
               </p>
             </div>
             <div className="mt-4 flex justify-end">
@@ -91,16 +106,20 @@ export default function SettingsPage() {
             </div>
           </Card>
 
-          <Card className="p-5">
-            <h2 className="text-sm font-semibold">Danger zone</h2>
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
-              <div>
-                <p className="text-sm font-medium">Reset demo data</p>
-                <p className="text-xs text-muted-foreground">Restores all mock customers, sales, rewards and points to their original state.</p>
+          {devTools && (
+            <Card className="p-5">
+              <h2 className="text-sm font-semibold">Developer tools</h2>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+                <div>
+                  <p className="text-sm font-medium">Reset demo data</p>
+                  <p className="text-xs text-muted-foreground">
+                    Development/preview only. Restores the local mock customers, sales, rewards and points.
+                  </p>
+                </div>
+                <Button variant="destructive" onClick={() => setResetOpen(true)}><RotateCcw /> Reset data</Button>
               </div>
-              <Button variant="destructive" onClick={() => setResetOpen(true)}><RotateCcw /> Reset data</Button>
-            </div>
-          </Card>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="tiers" className="mt-4">
@@ -163,6 +182,9 @@ export default function SettingsPage() {
                 <p className="text-xs text-muted-foreground">Choose light, dark or match your system setting.</p>
               </div>
               <ThemeToggle />
+            </div>
+            <div className="mt-3 rounded-lg border p-4">
+              <InstallAppAction />
             </div>
           </Card>
         </TabsContent>

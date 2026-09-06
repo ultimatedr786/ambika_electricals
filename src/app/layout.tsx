@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Providers } from "@/components/shared/providers";
+import { SIDEBAR_BOOT_SCRIPT } from "@/hooks/use-sidebar";
 
 export const metadata: Metadata = {
   title: {
@@ -44,6 +45,14 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/*
+          Applies the persisted desktop sidebar preference before first paint so
+          a collapsed rail never flashes open on refresh. Runs on <html>, so the
+          server-rendered markup is unchanged and hydration stays clean.
+        */}
+        <script dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }} />
+      </head>
       <body className="font-sans antialiased">
         <Providers>{children}</Providers>
       </body>

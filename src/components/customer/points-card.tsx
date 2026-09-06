@@ -11,6 +11,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { PointsTrendChart } from "@/components/charts";
 import { TierBadge } from "@/components/shared/tier-badge";
 import { tierProgress, pointsToRupees } from "@/lib/points";
+import { business } from "@/lib/mock-data/business";
 import { formatNumber } from "@/lib/utils";
 import { useStore } from "@/lib/store";
 import type { Customer } from "@/types";
@@ -150,9 +151,15 @@ export function PointsCard({ customer }: { customer: Customer }) {
             </div>
 
             <div className="rounded-xl border p-4">
-              <p className="text-sm font-medium">Your points never expire</p>
+              <p className="text-sm font-medium">
+                {business.pointsExpiryDays === null
+                  ? "Your points never expire"
+                  : `Your points expire after ${business.pointsExpiryDays} days`}
+              </p>
               <p className="mt-1 text-[13px] text-muted-foreground">
-                Points stay in your account for as long as it&apos;s active — there are no use-it-or-lose-it deadlines.
+                {business.pointsExpiryDays === null
+                  ? "Points stay in your account for as long as it's active — there are no use-it-or-lose-it deadlines."
+                  : "Check your activity for the earliest expiring points."}{" "}
                 (Redeemed reward vouchers do carry a short pickup window, shown on each voucher.)
               </p>
             </div>

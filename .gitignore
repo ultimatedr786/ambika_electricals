@@ -38,3 +38,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# playwright (real-browser UI acceptance gate)
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# local throwaway test database (scripts/dev/start-test-db.mjs)
+/.tmp-testdb/

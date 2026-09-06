@@ -8,10 +8,10 @@ import { motion } from "framer-motion";
 import { toast } from "sonner";
 import {
   BadgePercent, BarChart3, Building2, CreditCard, Gift, HelpCircle, LayoutGrid,
-  LogOut, Megaphone, MoreHorizontal, Package, Plus, Search, Settings, ShoppingCart,
-  Store, Trophy, UserRound, Users, Zap,
+  LogOut, Megaphone, MoreHorizontal, Package, PanelLeftClose, PanelLeftOpen, Plus,
+  Search, Settings, ShoppingCart, Store, Trophy, UserRound, Users, Zap,
 } from "lucide-react";
-import { Logo } from "@/components/shared/logo";
+import { Logo, LogoMark } from "@/components/shared/logo";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -23,21 +23,27 @@ import {
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+/**
+ * Internal developer persona switcher. The component hard-gates itself
+ * (`isDemoDevToolsEnabled()`), so in every normal build — demo or production —
+ * it renders nothing and Demo Mode is absent from the product chrome.
+ */
 import { DemoSwitcher } from "@/components/shared/demo-switcher";
 import { createClient as createBrowserSupabaseClient } from "@/lib/supabase/client";
-import { isDemoAuthEnabled } from "@/lib/auth/env";
+import { useGlobalSearchHotkey } from "@/components/shared/global-search";
 /**
  * cmdk + the palette's icon set are only needed once the user actually opens
  * search (⌘K / the header button), so the chunk is fetched on first open
  * instead of shipping with every business route.
  */
-const CommandPalette = dynamic(
-  () => import("@/components/business/command-palette").then((m) => m.CommandPalette),
+const GlobalSearch = dynamic(
+  () => import("@/components/shared/global-search").then((m) => m.GlobalSearch),
   { ssr: false }
 );
 import { NotificationCenter } from "@/components/business/notification-center";
 import { useServices } from "@/lib/services";
 import { usePrefetchOnIntent } from "@/hooks/use-prefetch";
+import { useSidebarCollapsed } from "@/hooks/use-sidebar";
 import { cn } from "@/lib/utils";
 
 const nav = [
@@ -92,7 +98,7 @@ export function BusinessShell({
   if (paletteOpen) paletteMounted.current = true;
   const [signOutOpen, setSignOutOpen] = React.useState(false);
   const supabase = React.useMemo(() => createBrowserSupabaseClient(), []);
-  const demoEnabled = isDemoAuthEnabled();
+  const { collapsed, ready: sidebarReady, toggle: toggleSidebar } = useSidebarCollapsed();
   const ownerRestricted = liveRole !== null && liveRole !== "owner" && liveRole !== "super_admin";
   const visibleNav = React.useMemo(() => {
     if (!ownerRestricted) return nav;
@@ -102,39 +108,54 @@ export function BusinessShell({
   }, [ownerRestricted]);
   const [moreOpen, setMoreOpen] = React.useState(false);
 
-  React.useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        setPaletteOpen((o) => !o);
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  useGlobalSearchHotkey(setPaletteOpen);
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
 
   return (
     <div className="min-h-[100dvh] bg-muted/30">
-      {/* Sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[248px] flex-col border-r bg-card lg:flex">
-        <div className="flex h-16 items-center px-5">
-          <Link href="/business/dashboard" className="rounded-lg"><Logo /></Link>
+      {/* Sidebar — width is driven by the --sidebar-w CSS variable so the
+          persisted collapse preference applies on the first paint. */}
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-30 hidden w-[var(--sidebar-w)] flex-col border-r bg-card lg:flex",
+          sidebarReady && "motion-safe:transition-[width] motion-safe:duration-200 motion-safe:ease-out"
+        )}
+        data-collapsed={collapsed ? "true" : "false"}
+      >
+        <div className={cn("flex h-16 items-center", collapsed ? "justify-center px-2" : "px-5")}>
+          <Link href="/business/dashboard" className="rounded-lg" aria-label="Ambika Electricals Rewards — dashboard">
+            {collapsed ? <LogoMark size={30} /> : <Logo />}
+          </Link>
         </div>
-        <div className="px-3 pb-2">
-          <Button asChild className="w-full"><Link href="/business/sales/new"><Plus /> New Sale</Link></Button>
+        <div className={cn("pb-2", collapsed ? "px-2" : "px-3")}>
+          {collapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button asChild size="icon" className="w-full">
+                  <Link href="/business/sales/new" aria-label="New sale"><Plus /></Link>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">New sale</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Button asChild className="w-full"><Link href="/business/sales/new"><Plus /> New Sale</Link></Button>
+          )}
         </div>
-        <nav className="scroll-region flex-1 px-3 py-2" aria-label="Business navigation">
+        <nav className={cn("scroll-region flex-1 py-2", collapsed ? "px-2" : "px-3")} aria-label="Business navigation" id="business-sidebar-nav">
           {visibleNav.map((group) => (
             <div key={group.group} className="mb-3">
-              <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                {group.group}
-              </p>
+              {collapsed ? (
+                <div className="mx-2 mb-1.5 h-px bg-border" role="presentation" />
+              ) : (
+                <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {group.group}
+                </p>
+              )}
               <div className="space-y-0.5">
                 {group.items.map((item) => {
                   const active = isActive(item.href);
-                  return (
+                  const link = (
                     <Link
                       key={item.href}
                       href={item.href}
@@ -142,8 +163,10 @@ export function BusinessShell({
                       onFocus={() => prefetch(item.href)}
                       onTouchStart={() => prefetch(item.href)}
                       aria-current={active ? "page" : undefined}
+                      aria-label={collapsed ? item.label : undefined}
                       className={cn(
-                        "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                        "relative flex items-center rounded-lg py-2 text-sm font-medium transition-colors",
+                        collapsed ? "justify-center px-0" : "gap-3 px-3",
                         active ? "text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground"
                       )}
                     >
@@ -154,24 +177,75 @@ export function BusinessShell({
                           transition={{ type: "spring", stiffness: 420, damping: 34 }}
                         />
                       )}
+                      {/* Collapsed rail keeps an unmistakable active-route marker. */}
+                      {active && collapsed && (
+                        <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary" aria-hidden />
+                      )}
                       <item.icon className="relative size-[18px]" aria-hidden />
-                      <span className="relative">{item.label}</span>
+                      {!collapsed && <span className="relative">{item.label}</span>}
                     </Link>
+                  );
+                  return collapsed ? (
+                    <Tooltip key={item.href}>
+                      <TooltipTrigger asChild>{link}</TooltipTrigger>
+                      <TooltipContent side="right">{item.label}</TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    link
                   );
                 })}
               </div>
             </div>
           ))}
         </nav>
-        <div className="border-t p-3">
-          <Link href="/customer/dashboard" className="flex items-center gap-2.5 rounded-lg p-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-            <Zap className="size-4" /> View customer app
-          </Link>
+        <div className={cn("space-y-1 border-t", collapsed ? "p-2" : "p-3")}>
+          {collapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link
+                  href="/customer/dashboard"
+                  aria-label="View customer app"
+                  className="flex items-center justify-center rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <Zap className="size-4" />
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent side="right">View customer app</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Link href="/customer/dashboard" className="flex items-center gap-2.5 rounded-lg p-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+              <Zap className="size-4" /> View customer app
+            </Link>
+          )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                aria-expanded={!collapsed}
+                aria-controls="business-sidebar-nav"
+                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                className={cn(
+                  "flex w-full items-center rounded-lg p-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+                  collapsed ? "justify-center" : "gap-2.5"
+                )}
+              >
+                {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+                {!collapsed && <span>Collapse sidebar</span>}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{collapsed ? "Expand sidebar" : "Collapse sidebar"}</TooltipContent>
+          </Tooltip>
         </div>
       </aside>
 
       {/* Topbar */}
-      <header className="sticky top-0 z-20 border-b bg-background/85 backdrop-blur-md lg:pl-[248px]">
+      <header
+        className={cn(
+          "sticky top-0 z-20 border-b bg-background/85 backdrop-blur-md lg:pl-[var(--sidebar-w)]",
+          sidebarReady && "motion-safe:transition-[padding] motion-safe:duration-200 motion-safe:ease-out"
+        )}
+      >
         <div className="safe-top flex h-14 items-center gap-2 px-4 sm:h-16 sm:px-6">
           <Link href="/business/dashboard" className="lg:hidden"><Logo size={28} showTagline={false} /></Link>
 
@@ -181,14 +255,17 @@ export function BusinessShell({
           >
             <Search className="size-4" />
             Search customers, products, sales…
-            <kbd className="ml-auto rounded border bg-background px-1.5 py-0.5 text-[10px] font-medium">⌘K</kbd>
+            <kbd className="ml-auto rounded border bg-background px-1.5 py-0.5 text-[10px] font-medium">
+              <span className="sr-only">Keyboard shortcut: </span>
+              <span aria-hidden>⌘K</span>
+            </kbd>
           </button>
 
           <div className="ml-auto flex items-center gap-1 lg:ml-2">
             <Button variant="ghost" size="icon-sm" className="lg:hidden" onClick={() => setPaletteOpen(true)} aria-label="Search">
               <Search className="size-[18px]" />
             </Button>
-            {demoEnabled && <DemoSwitcher />}
+            <DemoSwitcher />
             <NotificationCenter />
             <Tooltip>
               <TooltipTrigger asChild>
@@ -224,7 +301,12 @@ export function BusinessShell({
         </div>
       </header>
 
-      <main className="lg:pl-[248px]">
+      <main
+        className={cn(
+          "lg:pl-[var(--sidebar-w)]",
+          sidebarReady && "motion-safe:transition-[padding] motion-safe:duration-200 motion-safe:ease-out"
+        )}
+      >
         <div className="mx-auto w-full max-w-[1400px] px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:pb-10">{children}</div>
       </main>
 
@@ -310,7 +392,14 @@ export function BusinessShell({
         </Button>
       )}
 
-      {paletteMounted.current && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} hiddenHrefs={ownerRestricted ? OWNER_ONLY_HREFS : []} />}
+      {paletteMounted.current && (
+        <GlobalSearch
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          scope="business"
+          hiddenHrefs={ownerRestricted ? OWNER_ONLY_HREFS : []}
+        />
+      )}
       <ConfirmDialog
         open={signOutOpen}
         onOpenChange={setSignOutOpen}

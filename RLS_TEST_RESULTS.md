@@ -449,3 +449,356 @@ Note on RE4/RE6: reservations are pinned — `redemptions.inventory_scope` recor
 collect/cancel debit or release exactly that row. RE4 proves the last-unit race, the pool
 fallback and the unlimited path; RE6 proves the debit (on_hand 2 → 1, reserved 1 → 0) and the
 expired-hold release.
+
+## Run 6 — Step 3 Slice 5: secure membership QR + POS verification (86 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**8 files**, incl.
+`20260906160000_membership_qr_tokens.sql`) → supabase/seed.sql → **86 assertion cases**
+(S/A/W/R/V + L + SA + INV + RE + new **QR1–QR8**).
+
+```
+RLS check · server postgres://postgres:***@127.0.0.1:54329/postgres · throwaway db "rewardly_test"
+APPLIED stubs (13ms)
+APPLIED 20260905120000_auth_foundation_schema.sql (31ms)
+APPLIED 20260905120100_invitations_and_rpcs.sql (15ms)
+APPLIED 20260905120200_rls_policies.sql (19ms)
+APPLIED 20260906120000_points_ledger.sql (20ms)
+APPLIED 20260906130000_sales.sql (27ms)
+APPLIED 20260906140000_inventory.sql (27ms)
+APPLIED 20260906150000_rewards_redemptions.sql (32ms)
+APPLIED 20260906160000_membership_qr_tokens.sql (19ms)
+APPLIED seed.sql (27ms)
+… (78 earlier cases unchanged — see Runs 1–5) …
+PASS  QR1 issue — customer mints an opaque token; no PII/membership id encoded; previous token revoked
+PASS  QR2 verify — authorized staff scan succeeds, returns minimum data, is single-use and audited
+PASS  QR3 verify — malformed, unknown and tampered tokens all fail identically and are recorded
+PASS  QR4 verify — expiry is enforced
+PASS  QR5 verify — cross-business staff and customers cannot verify; store scoping enforced
+PASS  QR6 revocation + rate limits
+PASS  QR7 no DML grants and no SELECT on the token table; scan RPC is authenticated-only
+PASS  QR8 attempts are append-only, manager-visible and staff-invisible
+
+86/86 RLS cases passed.
+```
+
+pgTAP mirror grew from 155 to **185 assertions** (30 QR assertions). Docker is still unavailable in
+the sandbox, so it ran through `scripts/rls-check/pgtap-run.mjs`:
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 185 ok, 0 not ok — PASSED
+```
+
+The stub runner gained a `matches(text, regex, descr)` implementation (the QR series asserts the
+token's wire format with a regular expression); the real pgTAP extension has provided `matches()`
+since forever, so nothing changes for `supabase test db`.
+
+### What the QR series actually proves
+
+| Case | Property under test |
+| --- | --- |
+| QR1 | Payload shape `RWD1.<16>.<26>`; no membership number / name / points anywhere in it; TTL clamped to the 5-minute cap; only `sha256(salt‖secret)` persisted (recomputed from the issued secret in the test); the token table is unreadable even to the issuing customer's session; re-issuing marks the previous row `superseded`. |
+| QR2 | An authorized, store-assigned cashier resolves the right member; the response carries counter-safe fields only (no email/phone/enrolment payload); the scan is audited **by selector**; the secret provably appears nowhere in `audit_logs`; replaying the same code returns `qr_already_used`. |
+| QR3 | Malformed input, an unknown selector and a tampered secret all return the identical `qr_invalid`; all three land in `qr_verification_attempts`; the genuine token still verifies afterwards — failures never burn it. |
+| QR4 | An aged row is refused with `qr_expired`. |
+| QR5 | Authorization precedes lifecycle: a foreign tenant's owner and a plain customer both get `not_authorized` (with no customer fields in the reply); a store-scoped cashier gets `store_forbidden` at an unassigned store and `store_not_in_business` for another tenant's store; **no denial consumes the token**. |
+| QR6 | "Hide my QR" revokes the live token (`qr_revoked` at the counter) and writes a per-business audit row carrying the token count and reason but no selector; the 10-issues-per-minute limit trips. |
+| QR7 | Grants: `authenticated` has no SELECT/INSERT/UPDATE/DELETE on `membership_qr_tokens`, no INSERT/UPDATE on `qr_verification_attempts`, `anon` has neither SELECT nor EXECUTE on issue/verify. |
+| QR8 | Attempts are append-only (the trigger refuses even `postgres`), managers can review their business's trail, cashiers see zero rows. |
+
+### Design change forced by the tests
+
+`verify_membership_qr_token` originally raised on every failure. QR3/QR8 failed with "attempts not
+recorded": a `raise` rolls back the statement, taking the `qr_verification_attempts` row and the
+`write_audit` row with it — which would have defeated both the security trail **and** the scanner
+rate limit that reads from it. The function now **returns** `{ok:false, reason:'<code>'}` for every
+verification failure and raises only `authentication_required` (28000). This is the same lesson the
+rewards slice learned with lazy expiry, now stated as a rule in RLS_POLICIES §4: *an RPC that must
+leave evidence cannot raise.*
+
+## Run 7 — Step 3 Slice 6: versioned loyalty rule engine (94 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**9 files**, incl.
+`20260906170000_loyalty_rules.sql`) → supabase/seed.sql → **94 assertion cases**
+(S/A/W/R/V + L + SA + INV + RE + QR + new **LR1–LR8**).
+
+```
+RLS check · server postgres://postgres:***@127.0.0.1:54329/postgres · throwaway db "rewardly_test"
+APPLIED stubs (14ms)
+APPLIED 20260905120000_auth_foundation_schema.sql (31ms)
+APPLIED 20260905120100_invitations_and_rpcs.sql (16ms)
+APPLIED 20260905120200_rls_policies.sql (19ms)
+APPLIED 20260906120000_points_ledger.sql (20ms)
+APPLIED 20260906130000_sales.sql (28ms)
+APPLIED 20260906140000_inventory.sql (28ms)
+APPLIED 20260906150000_rewards_redemptions.sql (33ms)
+APPLIED 20260906160000_membership_qr_tokens.sql (20ms)
+APPLIED 20260906170000_loyalty_rules.sql (27ms)
+APPLIED seed.sql (32ms)
+… (86 earlier cases unchanged — see Runs 1–6) …
+PASS  LR1 rule engine — every business starts on the launch policy, and history is stamped
+PASS  LR2 rule changes are owner-only
+PASS  LR3 invalid rate / effective-date configuration fails safely
+PASS  LR4 owner edit appends a version and closes the previous one (never rewrites)
+PASS  LR5 history keeps its version; new sales use the currently effective one
+PASS  LR6 versions are immutable and cannot be resurrected
+PASS  LR7 tenancy + visibility + no direct DML for API roles
+PASS  LR8 a scheduled future version does not price today's sales
+
+94/94 RLS cases passed.
+```
+
+pgTAP mirror grew from 185 to **222 assertions** (37 LR assertions):
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 222 ok, 0 not ok — PASSED
+```
+
+### The five behaviours §4 asks for, and where they are proven
+
+| §4 requirement | Case |
+| --- | --- |
+| Only the owner can create/change a rule | LR2 — manager, cashier, customer and a foreign tenant's owner all get 42501, and the version count is unchanged afterwards |
+| Cross-business rules cannot be used | LR7 — the resolver never returns another tenant's version, staff/owners see nothing across the boundary, and the internal resolver is not callable by clients at all |
+| Existing sale history retains its old rule version | LR5 — the SA1 sale is still pinned to v1 with its original 125 points after v2 goes live, and its ledger entry keeps v1 too |
+| A new sale uses the currently effective rule | LR5 (₹1,250 earns 250 pts under v2 instead of 125) and LR8 (a version scheduled for next week does not price today's sale, but does resolve on its date) |
+| Invalid rate/effective-date configuration fails safely | LR3 — seven invalid shapes each raise 22023 and the version count is byte-identical before and after |
+
+### Notes from writing the suite
+
+- **The rule engine has to be self-installing.** The first run failed every sales case with
+  `loyalty_rule_missing`: the migration backfills businesses that exist *at migration time*, but
+  the seed (and `complete_business_signup` in production) creates them afterwards. An AFTER INSERT
+  trigger on `businesses` now installs the launch policy as version 1, so a tenant can never exist
+  without a rule and `create_sale` never has to guess.
+- **`create_sale` v3 is v2 with one step changed.** The first attempt reimplemented the function
+  from scratch and broke four inventory cases on error-message and code differences. It is now the
+  Slice-3 body with exactly four edits: resolve the version, use `loyalty_points_for`, stamp
+  `sales.loyalty_rule_version_id`, and add the version to the audit/response.
+- **The ledger stamp lives in `ledger_post_entry`, not `create_sale`.** `points_ledger` is
+  append-only (a trigger rejects UPDATE even for the owner), so stamping after the fact is
+  impossible by design. Deriving the version inside the shared helper — any entry whose `source_id`
+  is a sale inherits that sale's version — also stamps the void reversal for free.
+- **Immutability is a trigger, not a convention.** LR6 shows `postgres` itself cannot rewrite
+  economics, move `effective_from`, or reopen a closed window. Deletion is deliberately *not*
+  blocked by the trigger: a version must cascade away with its business, and grants already stop
+  every API role from deleting one.
+
+## Run 8 — Step 3 Slice 7: persistent in-app notifications + Realtime (101 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**10 files**, incl.
+`20260906180000_notifications.sql`) → supabase/seed.sql → **101 assertion cases**
+(S/A/W/R/V + L + SA + INV + RE + QR + LR + new **NT1–NT7**).
+
+```
+… (94 earlier cases unchanged — see Runs 1–7) …
+PASS  NT1 notifications — events are emitted by the facts that cause them
+PASS  NT2 notifications — recipients see only what they are authorized to see
+PASS  NT3 notifications — cross-tenant and cross-store access is denied
+PASS  NT4 notifications — read state is per profile and persists
+PASS  NT5 notifications — duplicate and replayed events never duplicate rows
+PASS  NT6 notifications — low stock alerts only where configured, only on crossing
+PASS  NT7 notifications — Realtime exposure is limited to the event table
+
+101/101 RLS cases passed.
+```
+
+pgTAP mirror grew from 222 to **264 assertions** (42 NT assertions):
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 264 ok, 0 not ok — PASSED
+```
+
+### The five §5 required tests, and where they are proven
+
+| §5 requirement | Case |
+| --- | --- |
+| Customer/business user receives only authorized notifications | NT2 — customer sees own membership only and zero business rows; cashier sees neither customer rows nor owner-scoped ones; owner sees the owner-scoped ones |
+| Cross-tenant/store access is denied | NT3 — the other tenant reads nothing and cannot mark read (42501); a satellite-store alert is invisible to the main-store cashier but visible to the assigned one |
+| Read/mark-all state persists | NT4 — read rows survive, are personal (the owner cannot see or forge the cashier's), mark-all is audience-scoped and returns 0 on a second run, and the business mark-all leaves the customer bell alone |
+| Duplicate/reconnect events do not duplicate activity or points | NT5 — an idempotency-key sale replay emits nothing new, a duplicate `dedupe_key` is a unique violation, and `notify_emit` returns null instead of aborting its caller. Client-side: `tests/notification-merge.test.mjs` proves the list merge is replay-safe and that read state is monotonic |
+| UI works with Realtime unavailable | The hook treats Realtime as an accelerator, not a dependency: the initial state comes from an ordinary RLS-filtered fetch, `SUBSCRIBED` triggers a catch-up resync, and `CHANNEL_ERROR`/`TIMED_OUT`/`offline` degrade to a visible "Reconnecting…/Offline" line with a Retry that refetches. With Supabase unconfigured the component renders the prototype bell unchanged (verified in a real browser) |
+
+### Notes from writing the suite
+
+- **Two flaky assertions were my fault, not the code's.** NT1 first selected "the customer's points
+  notification" without pinning it to the sale under test — the seeded member has earned points in
+  earlier cases, so `select … into` picked an arbitrary row and the case passed or failed depending
+  on plan order. Pinning on `source_id` made it deterministic across three consecutive runs. NT6
+  had the same shape (`order by created_at desc limit 1` with same-transaction timestamps) and now
+  matches on the `low-stock:` dedupe prefix.
+- **`qr_verification_attempts` timestamps are `attempted_at`, not `created_at`.** The invalid-scan
+  burst detector failed closed on the first run, which is the right direction for a trigger to fail
+  but still a bug; caught by QR3/QR8 rather than by a notification case.
+- **Emitting from triggers keeps the blast radius at zero.** Ten prior migrations' RPC bodies are
+  untouched by this slice; the whole notification surface is additive.
+
+## Run 9 — Step 3 Slice 8: catalogue images (Storage) + essential settings (109 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**11 files**, incl.
+`20260906190000_storage_and_settings.sql`) → supabase/seed.sql → **109 assertion cases**
+(previous 101 + new **ST1–ST4**, **SET1–SET4**).
+
+```
+… (101 earlier cases unchanged — see Runs 1–8) …
+PASS  ST1 catalogue images — manager+ can attach; validation rejects everything else
+PASS  ST2 catalogue images — authorization and tenancy
+PASS  ST3 catalogue images — thumbnail, alt text and detach behaviour
+PASS  ST4 reward images are visible to members of that business only
+PASS  SET1 business identity — owner only, validated, audited
+PASS  SET2 stores — owner-only upsert, close instead of delete, tenant-safe
+PASS  SET3 notification preferences — per profile, security never mutable
+PASS  SET4 settings surface — grants and anonymous denial
+
+109/109 RLS cases passed.
+```
+
+pgTAP mirror grew from 264 to **303 assertions** (39 ST/SET assertions):
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 303 ok, 0 not ok — PASSED
+```
+
+### Two real bugs the tests caught
+
+Both were in code I had just written and believed correct:
+
+1. **`attach_catalogue_image` violated its own unique index.** It inserted the new image with
+   `is_primary = true` and demoted the previous thumbnail *afterwards*, so
+   `catalogue_images_one_primary_product` fired mid-statement and the whole attach failed — but
+   only on the **second** upload for a product, which a happy-path smoke test would never reach.
+   ST3 hit it immediately. The demotion now happens before the insert.
+2. **`upsert_store` referenced a column that does not exist.** I wrote `address`; the table has
+   `address_line` (plus `city`/`region`). SET2 failed with `column "address" of relation "stores"
+   does not exist`. The RPC now matches the real schema and exposes `city`/`region` too.
+
+Neither would have been visible from the UI until an owner tried the exact second action.
+
+### Storage note for the harness
+
+The `storage` schema exists on Supabase but not on the bare PostgreSQL the local harness uses, so
+the bucket and policy block is wrapped in a guarded `DO` that emits a notice and returns. The
+migration therefore applies identically to both, and the bucket policies are exercised on staging
+rather than here — called out in the owner checklist rather than silently assumed.
+
+## Run 10 — Step 3 Slice 9: schema invariants in CI (109 cases, 306 pgTAP)
+
+The database work in this slice was not a feature; it was a finding.
+
+`scripts/ci/validate-migrations.mjs` — new in the CI slice — applies every
+migration to an empty database and then asserts invariants that a syntactically
+valid migration set can still violate. On its first run it failed:
+
+```
+Schema validation FAILED — 1 problem(s):
+
+  • public.businesses grants UPDATE to an API role — writes should go through an RPC
+```
+
+`businesses.UPDATE` and (after tightening the allow-list) `stores.INSERT/UPDATE`
+had been granted since the original RLS migration. The owner-only policies meant
+neither was a privilege-escalation hole — but once `update_business_profile` and
+`upsert_store` existed, both were a way for an owner to change tenant
+configuration **without leaving an audit entry**, and without the GSTIN/email
+validation. No application code used either path (every `from("businesses")` and
+`from("stores")` call in `src/` is a SELECT), so
+`20260906200000_tighten_settings_grants.sql` revokes them outright.
+
+Two existing cases encoded the old contract and had to be rewritten rather than
+deleted — they now assert the *new* one:
+
+- **W2** — nobody has a direct UPDATE path on `businesses`; a manager is refused
+  by both the grant and the RPC; the owner's change goes through
+  `update_business_profile` and is audited.
+- **W4** — nobody writes `stores` directly; `upsert_store` creates, closing is a
+  status flip, and DELETE is granted to nobody.
+
+```
+109/109 RLS cases passed.
+pgTAP stub run: 306 ok, 0 not ok — PASSED
+```
+
+### Invariants now enforced on every CI run
+
+1. Migration filenames are `<14-digit timestamp>_<snake_case>.sql`, with no
+   duplicate timestamps (duplicates make apply order undefined).
+2. Every `public` table has row level security enabled.
+3. No API role holds INSERT/UPDATE/DELETE outside a three-table allow-list.
+4. `anon` holds no table grants at all.
+5. Every `SECURITY DEFINER` function pins `search_path`.
+
+Invariant 5 is worth keeping even though all 65 definer functions already
+comply: it is the difference between "we remembered every time so far" and
+"forgetting is a build failure".
+
+### Real pgTAP, not only the stubs
+
+§7 says the local stub runner must not be the only source of launch confidence.
+`scripts/rls-check/pgtap-run.mjs` now takes `PGTAP_REAL=1`, which installs the
+genuine pgTAP extension instead of substituting stubs, and CI runs it that way
+against `supabase/postgres` — the same image the hosted platform runs, so
+`extensions.pgcrypto`, `pgtap` and our `search_path` assumptions are exercised
+for real. The stub mode remains for laptops without Docker.
+
+## Run 11 — Slice 10: trigger-function EXECUTE revoked (110 cases, 309 pgTAP)
+
+A gap I flagged in the handoff rather than fixing silently, then closed on
+request.
+
+PostgreSQL grants `EXECUTE` to `PUBLIC` on every new function. That made every
+trigger function in `public` — `notify_on_*`, `points_ledger_no_mutation`,
+`qr_attempts_no_mutation`, `install_default_loyalty_rule`, `sales_insert_check`,
+`points_ledger_insert_check`, `lrv_*`, `catalogue_image_consistency` — callable
+by `anon` and `authenticated`. Not exploitable: PostgreSQL raises
+`trigger functions can only be called as triggers` (0A000) before the body runs.
+But it was inconsistent with the explicit revokes on every other internal
+function, and "harmless surface" is how surface accumulates.
+
+`20260906210000_revoke_trigger_function_execute.sql` loops over
+`prorettype = 'trigger'::regtype` in `public` and revokes from
+`public, anon, authenticated`.
+
+### The two things worth proving
+
+**1. The validator rule actually bites.** Removing the migration and re-running
+`scripts/ci/validate-migrations.mjs`:
+
+```
+Schema validation FAILED — 14 problem(s):
+  • trigger function public.notify_on_rule_version is EXECUTE-able by an API role
+  • trigger function public.points_ledger_insert_check is EXECUTE-able by an API role
+  • trigger function public.points_ledger_no_mutation is EXECUTE-able by an API role
+  • trigger function public.qr_attempts_no_mutation is EXECUTE-able by an API role
+  • trigger function public.sales_insert_check is EXECUTE-able by an API role
+  …
+```
+
+A rule that has never failed is a rule nobody has tested.
+
+**2. Nothing was disarmed.** EXECUTE on a trigger function is checked at
+`CREATE TRIGGER` time, not each time it fires — but that is a claim, and the
+suites are the evidence. New case **HD1** asserts, as a signed-in user:
+
+- no function returning `trigger` is EXECUTE-able by `authenticated` or `anon`;
+- recording a sale still fires the notification emitter on `points_ledger`;
+- the ledger append-only guard still refuses an UPDATE;
+- the rule immutability guard still refuses an economics change.
+
+```
+110/110 RLS cases passed.
+pgTAP stub run: 309 ok, 0 not ok — PASSED
+```
+
+All 108 pre-existing cases — which exercise every trigger in the schema as
+`authenticated` — continued to pass unchanged, which is the broader proof.

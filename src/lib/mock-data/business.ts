@@ -12,6 +12,12 @@ export const business = {
   currency: "INR",
   pointValue: 0.1, // 1 point ≈ ₹0.10
   earnRate: { spend: 100, points: 10 },
+  /**
+   * Demo mirror of the live rule engine's `points_expiry_days`.
+   * null = points never expire. Live deployments read this from
+   * `loyalty_rule_versions`, never from here.
+   */
+  pointsExpiryDays: null as number | null,
 };
 
 export const tiers: TierConfig[] = [

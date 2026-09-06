@@ -4,7 +4,7 @@
 -- and anywhere PostgreSQL is available without Docker/Supabase CLI). Where
 -- Docker is unavailable, `node scripts/rls-check/pgtap-run.mjs` executes this
 -- same file against the harness database with stubs for the pgTAP subset used
--- here (plan/is/ok/lives_ok/throws_ok/finish).
+-- here (plan/is/ok/matches/lives_ok/throws_ok/finish).
 --
 -- Design note: every pgTAP assertion runs as the postgres role. Identity
 -- switching happens inside helper functions (SET LOCAL role + JWT claims),
@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(155);
+select plan(309);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -225,13 +225,26 @@ select is(
   'W1: status column is not user-updatable'
 );
 
-select perform_as('authenticated', '22222222-2222-4222-8222-222222222222',
-  'update public.businesses set name = ''Manager Takeover'' where id = ''aaaaaaaa-0000-4000-8000-000000000001'''
+-- Slice 9 revoked the direct UPDATE grant on businesses (it bypassed the
+-- validation and the audit entry), so this is now a hard denial rather than
+-- an RLS filter that quietly matches nothing.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'update public.businesses set name = ''Manager Takeover''
+      where id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  '42501',
+  'W2: nobody has a direct UPDATE path on businesses'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.update_business_profile(''Manager Takeover'')'),
+  '42501',
+  'W2: a manager cannot change business settings through the RPC either'
 );
 select is(
   (select name from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000001'),
   'Ambika Electricals',
-  'W2: manager cannot change business settings'
+  'W2: the business name is unchanged'
 );
 
 select is(
@@ -239,6 +252,12 @@ select is(
     'insert into public.stores (business_id, name) values (''aaaaaaaa-0000-4000-8000-000000000001'', ''Rogue Store'')'),
   '42501',
   'W4: staff cannot create stores'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'insert into public.stores (business_id, name) values (''aaaaaaaa-0000-4000-8000-000000000001'', ''Direct Store'')'),
+  '42501',
+  'W4: not even the owner writes stores directly — upsert_store is the path'
 );
 
 select perform_as('authenticated', '33333333-3333-4333-8333-333333333333',
@@ -269,13 +288,14 @@ select is(
   'W7: direct audit INSERT denied'
 );
 
+-- The supported path: the RPC validates, audits, and is owner-only.
 select perform_as('authenticated', '88888888-8888-4888-8888-888888888888',
-  'update public.businesses set name = ''Owner Edit'' where id = ''aaaaaaaa-0000-4000-8000-000000000001'''
+  'select public.update_business_profile(''Owner Edit'')'
 );
 select is(
   (select name from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000001'),
   'Owner Edit',
-  'W2: owner updates their own business'
+  'W2: the owner updates their own business through update_business_profile'
 );
 update public.businesses set name = 'Ambika Electricals' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
 update public.profiles set display_name = 'Rahul Sharma' where id = '55555555-5555-4555-8555-555555555555';
@@ -1269,6 +1289,1127 @@ select is(
      values (''aaaaaaaa-0000-4000-8000-000000000001'')'),
   '42501',
   'RE9: no direct DML on redemptions (RPC-only)'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Membership QR tokens (20260906160000_membership_qr_tokens.sql)
+-- Mirrors cases QR1-QR8 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+-- QR1: issuance shape, opacity and hashed-at-rest storage.
+select set_config('app.qr_tok1',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.issue_membership_qr_token() ->> ''token'''), true);
+select matches(
+  current_setting('app.qr_tok1', true),
+  '^RWD1[.][0-9A-HJKMNP-TV-Z]{16}[.][0-9A-HJKMNP-TV-Z]{26}$',
+  'QR1: token is an opaque versioned selector.secret payload'
+);
+select is(
+  (select count(*) from (select current_setting('app.qr_tok1', true) as t) x
+    where x.t like '%AE-DEVRAHUL1%' or upper(x.t) like '%RAHUL%')::int,
+  0,
+  'QR1: payload carries no membership number or customer name'
+);
+select is(
+  (select count(*) from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok1', true), '.', 2)
+      and verifier_hash = extensions.digest(
+            salt || convert_to(split_part(current_setting('app.qr_tok1', true), '.', 3), 'UTF8'),
+            'sha256'))::int,
+  1,
+  'QR1: only a salted sha256 verifier is persisted'
+);
+select ok(
+  (select expires_at <= now() + interval '5 minutes'
+     from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok1', true), '.', 2)),
+  'QR1: TTL is clamped to the 5 minute hard cap'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.membership_qr_tokens'),
+  '42501',
+  'QR1: customers cannot read the token table'
+);
+
+-- Re-issuing supersedes the previous live token.
+select set_config('app.qr_tok2',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.issue_membership_qr_token() ->> ''token'''), true);
+select is(
+  (select revoke_reason from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok1', true), '.', 2)),
+  'superseded',
+  'QR1: issuing a new QR revokes the previous one'
+);
+
+-- QR2: authorized staff scan.
+select set_config('app.qr_res1',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'')::text',
+      current_setting('app.qr_tok2', true))), true);
+select is(
+  current_setting('app.qr_res1', true)::jsonb ->> 'ok', 'true',
+  'QR2: store-assigned cashier verifies successfully'
+);
+select is(
+  current_setting('app.qr_res1', true)::jsonb ->> 'membership_no', 'AE-DEVRAHUL1',
+  'QR2: verification resolves the right membership'
+);
+select is(
+  (select count(*) from jsonb_object_keys(current_setting('app.qr_res1', true)::jsonb) k
+    where k in ('email', 'phone', 'enrollment_data'))::int,
+  0,
+  'QR2: response is limited to counter-safe fields'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action = 'membership_qr.verified'
+      and metadata ->> 'selector' = split_part(current_setting('app.qr_tok2', true), '.', 2))::int,
+  1,
+  'QR2: successful scan is audited by selector'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action like 'membership_qr%'
+      and metadata::text like '%' || split_part(current_setting('app.qr_tok2', true), '.', 3) || '%')::int,
+  0,
+  'QR2: audit metadata never contains the token secret'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'') ->> ''reason''',
+      current_setting('app.qr_tok2', true))),
+  'qr_already_used',
+  'QR2: tokens are single use'
+);
+
+-- QR3: malformed / unknown / tampered payloads fail identically.
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.verify_membership_qr_token(''not-a-token'', null) ->> ''reason'''),
+  'qr_invalid',
+  'QR3: malformed payload rejected'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.verify_membership_qr_token(
+       ''RWD1.ZZZZZZZZZZZZZZZZ.ZZZZZZZZZZZZZZZZZZZZZZZZZZ'', null) ->> ''reason'''),
+  'qr_invalid',
+  'QR3: unknown selector rejected with the same opaque reason'
+);
+select ok(
+  (select count(*) from public.qr_verification_attempts
+    where actor_id = '33333333-3333-4333-8333-333333333333'
+      and outcome = 'invalid') >= 2,
+  'QR3: failed scans are recorded for the security trail'
+);
+
+-- QR4: expiry.
+select set_config('app.qr_tok3',
+  extensions.text_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    'select public.issue_membership_qr_token(null, 30) ->> ''token'''), true);
+select lives_ok(
+  format('update public.membership_qr_tokens
+             set issued_at = now() - interval ''4 minutes'',
+                 expires_at = now() - interval ''1 second''
+           where selector = %L', split_part(current_setting('app.qr_tok3', true), '.', 2)),
+  'QR4: age the token as the maintenance role'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'') ->> ''reason''',
+      current_setting('app.qr_tok3', true))),
+  'qr_expired',
+  'QR4: expired tokens are refused'
+);
+
+-- QR5: authorization before lifecycle; store scoping.
+select set_config('app.qr_tok4',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.issue_membership_qr_token() ->> ''token'''), true);
+select is(
+  extensions.text_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    format('select public.verify_membership_qr_token(%L, null) ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'not_authorized',
+  'QR5: foreign tenant owner cannot verify'
+);
+select is(
+  extensions.text_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    format('select public.verify_membership_qr_token(%L, null) ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'not_authorized',
+  'QR5: customers cannot act as scanners'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000002'') ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'store_forbidden',
+  'QR5: cashier cannot scan for an unassigned store'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000009'') ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'store_not_in_business',
+  'QR5: a store from another tenant is rejected'
+);
+select is(
+  (select consumed_at from public.membership_qr_tokens
+    where selector = split_part(current_setting('app.qr_tok4', true), '.', 2)),
+  null::timestamptz,
+  'QR5: denied attempts never consume the token'
+);
+
+-- QR6: customer revocation ("hide my QR").
+select is(
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.revoke_membership_qr_tokens(''lost_device'')::text'),
+  '1',
+  'QR6: revoke clears the live token'
+);
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.verify_membership_qr_token(%L, ''bbbbbbbb-0000-4000-8000-000000000001'') ->> ''reason''',
+      current_setting('app.qr_tok4', true))),
+  'qr_revoked',
+  'QR6: revoked tokens are refused at the counter'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action = 'membership_qr.revoked'
+      and business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+      and metadata ->> 'reason' = 'lost_device')::int,
+  1,
+  'QR6: revocation is audited per business, without a selector'
+);
+
+-- QR7: grants.
+select ok(
+  not has_table_privilege('authenticated', 'public.membership_qr_tokens', 'INSERT')
+  and not has_table_privilege('authenticated', 'public.membership_qr_tokens', 'UPDATE')
+  and not has_table_privilege('authenticated', 'public.qr_verification_attempts', 'INSERT'),
+  'QR7: QR tables are RPC-only for API roles'
+);
+select ok(
+  not has_function_privilege('anon', 'public.verify_membership_qr_token(text, uuid)', 'EXECUTE')
+  and not has_function_privilege('anon', 'public.issue_membership_qr_token(uuid, integer)', 'EXECUTE'),
+  'QR7: anonymous callers cannot issue or verify'
+);
+
+-- QR8: attempts are append-only and manager-scoped.
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.qr_verification_attempts set outcome = ''verified'''),
+  '42501',
+  'QR8: verification attempts are append-only'
+);
+select ok(
+  extensions.count_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select count(*) from public.qr_verification_attempts') > 0,
+  'QR8: managers can review the scan trail'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.qr_verification_attempts'),
+  0::bigint,
+  'QR8: cashiers cannot read the scan trail'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Versioned loyalty rule engine (20260906170000_loyalty_rules.sql)
+-- Mirrors cases LR1-LR8 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+-- LR1: launch policy installed for every business; history stamped.
+select is(
+  (select v.earn_spend_paise || ':' || v.earn_points || ':' || v.point_value_paise
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  '10000:10:10',
+  'LR1: launch policy is Rs100 -> 10 points, 1 point = 10 paise'
+);
+select is(
+  (select v.points_expiry_days
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  null::integer,
+  'LR1: no points expiry at launch'
+);
+select is(
+  (select count(*) from public.loyalty_rules
+    where business_id = 'aaaaaaaa-0000-4000-8000-000000000002')::int,
+  1,
+  'LR1: the second tenant gets its own independent rule series'
+);
+select is(
+  (select count(*) from public.sales where loyalty_rule_version_id is null)::int,
+  0,
+  'LR1: every sale is stamped with the version that priced it'
+);
+select is(
+  (select count(*) from information_schema.columns
+    where table_schema = 'public' and table_name = 'businesses'
+      and column_name in ('earn_spend_paise', 'earn_points'))::int,
+  0,
+  'LR1: the hard-coded earn columns are gone from businesses'
+);
+
+-- LR2: owner-only.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.set_loyalty_rule(null, 20000, 10, 10, 0, null, ''manager'')'),
+  '42501',
+  'LR2: a manager cannot change the loyalty rule'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.set_loyalty_rule(null, 20000, 10, 10, 0, null, ''staff'')'),
+  '42501',
+  'LR2: a cashier cannot change the loyalty rule'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.set_loyalty_rule(null, 20000, 10, 10, 0, null, ''customer'')'),
+  '42501',
+  'LR2: a customer cannot change the loyalty rule'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select public.set_loyalty_rule(''aaaaaaaa-0000-4000-8000-000000000001'',
+       20000, 10, 10, 0, null, ''cross tenant'')'),
+  '42501',
+  'LR2: another tenant''s owner cannot change our rule'
+);
+
+-- LR3: invalid configuration fails safely.
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 50, 10, 10, 0, null, ''tiny'')'),
+  '22023',
+  'LR3: a sub-rupee spend threshold is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 10000, 5000, 10, 0, null, ''greedy'')'),
+  '22023',
+  'LR3: 5000 points per step is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, null, null, 10, 0, null, ''nulls'')'),
+  '22023',
+  'LR3: a missing rate is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 10000, 10, 10, 0, now() - interval ''2 days'', ''backdate'')'),
+  '22023',
+  'LR3: backdating (which would re-price settled history) is refused'
+);
+select is(
+  (select count(*) from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001')::int,
+  1,
+  'LR3: no invalid attempt wrote a version'
+);
+
+-- LR4: an owner edit appends v2 and closes v1.
+select set_config('app.lr_v2',
+  extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 5000, 10, 10, 10000, null, ''Festive rate'')::text'), true);
+select is(
+  current_setting('app.lr_v2', true)::jsonb ->> 'version', '2',
+  'LR4: the edit appends version 2'
+);
+select is(
+  current_setting('app.lr_v2', true)::jsonb ->> 'superseded_version', '1',
+  'LR4: version 1 is reported superseded'
+);
+select is(
+  (select v.status::text || ':' || (v.effective_to is not null)::text
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  'superseded:true',
+  'LR4: version 1 is closed, not rewritten'
+);
+select is(
+  (select v.earn_spend_paise || ':' || v.earn_points
+     from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and v.version = 1),
+  '10000:10',
+  'LR4: version 1 economics are untouched'
+);
+select is(
+  (select count(*) from public.loyalty_rule_versions v
+     join public.loyalty_rules r on r.id = v.rule_id
+    where r.business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+      and v.effective_to is null)::int,
+  1,
+  'LR4: exactly one open window survives'
+);
+select is(
+  (select count(*) from public.audit_logs
+    where action = 'loyalty_rule.version_created'
+      and (metadata ->> 'version')::int = 2
+      and (metadata -> 'from' ->> 'earn_spend_paise')::bigint = 10000)::int,
+  1,
+  'LR4: the change is audited with before and after'
+);
+
+-- LR5: history keeps its version; new sales use the current one.
+select is(
+  (select v.version from public.sales s
+     join public.loyalty_rule_versions v on v.id = s.loyalty_rule_version_id
+    where s.idempotency_key = 'pgtap-sa1'),
+  1,
+  'LR5: the pre-change sale is still pinned to version 1'
+);
+select set_config('app.lr_sale2',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(
+       ''bbbbbbbb-0000-4000-8000-000000000001'',
+       ''[{"name":"Wiring kit","qty":1,"unit_price_paise":125000}]''::jsonb,
+       ''[{"method":"cash","amount_paise":125000}]''::jsonb,
+       (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1''),
+       0, ''pgtap-lr5'')::text'), true);
+select is(
+  current_setting('app.lr_sale2', true)::jsonb -> 'points' ->> 'base', '250',
+  'LR5: the new sale earns at the v2 rate (Rs50 -> 10 pts)'
+);
+select is(
+  current_setting('app.lr_sale2', true)::jsonb ->> 'loyalty_rule_version', '2',
+  'LR5: the new sale is stamped with version 2'
+);
+select is(
+  (select l.loyalty_rule_version_id from public.points_ledger l
+    where l.source_id = (current_setting('app.lr_sale2', true)::jsonb ->> 'sale_id')::uuid
+      and l.source_type = 'sale'),
+  (current_setting('app.lr_sale2', true)::jsonb ->> 'loyalty_rule_version_id')::uuid,
+  'LR5: the ledger entry inherits the sale''s version'
+);
+select is(
+  (select s.total_points from public.sales s where s.idempotency_key = 'pgtap-sa1'),
+  125,
+  'LR5: the historic sale''s points were not recalculated'
+);
+
+-- LR6: immutability.
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.loyalty_rule_versions set earn_points = 999'),
+  '42501',
+  'LR6: rule economics cannot be rewritten, even by postgres'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.loyalty_rule_versions set effective_to = null where version = 1'),
+  '42501',
+  'LR6: a closed window cannot be reopened'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'insert into public.loyalty_rule_versions
+       (rule_id, business_id, version, earn_spend_paise, earn_points, effective_from, points_expiry_days)
+     select rule_id, business_id, 99, 10000, 10, now() + interval ''2 days'', 365
+       from public.loyalty_rule_versions limit 1'),
+  '23514',
+  'LR6: points expiry cannot be configured while no sweeper exists'
+);
+
+-- LR7: tenancy, visibility and RPC-only writes.
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.loyalty_rule_versions'),
+  1::bigint,
+  'LR7: a customer sees only the rule in force right now'
+);
+select ok(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.loyalty_rule_versions') >= 2,
+  'LR7: staff can read their own business rule history'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.loyalty_rule_versions
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  0::bigint,
+  'LR7: rule history never crosses tenants'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'insert into public.loyalty_rules (business_id, code)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''sneaky'')'),
+  '42501',
+  'LR7: even the owner cannot write rules directly (RPC-only)'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.active_loyalty_rule_version(''aaaaaaaa-0000-4000-8000-000000000001'')'),
+  '42501',
+  'LR7: the internal resolver is not callable by clients'
+);
+select ok(
+  not has_function_privilege('anon',
+    'public.set_loyalty_rule(uuid, bigint, integer, integer, bigint, timestamptz, text)', 'EXECUTE'),
+  'LR7: anon cannot set the loyalty rule'
+);
+
+-- LR8: a scheduled version does not price today's sales.
+select set_config('app.lr_v3',
+  extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.set_loyalty_rule(null, 100000, 10, 10, 0, now() + interval ''7 days'', ''New year'')::text'), true);
+select is(
+  current_setting('app.lr_v3', true)::jsonb ->> 'status', 'scheduled',
+  'LR8: a future version is scheduled, not active'
+);
+select is(
+  (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001')).version,
+  2,
+  'LR8: today still resolves to version 2'
+);
+select is(
+  (public.active_loyalty_rule_version('aaaaaaaa-0000-4000-8000-000000000001',
+     now() + interval '8 days')).version,
+  3,
+  'LR8: the scheduled version takes effect on its date'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Persistent in-app notifications (20260906180000_notifications.sql)
+-- Mirrors cases NT1-NT7 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+-- NT1: the facts emit their own notifications.
+select set_config('app.nt_sale',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(
+       ''bbbbbbbb-0000-4000-8000-000000000001'',
+       ''[{"name":"Conduit pipe","qty":1,"unit_price_paise":60000}]''::jsonb,
+       ''[{"method":"cash","amount_paise":60000}]''::jsonb,
+       (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1''),
+       0, ''pgtap-nt1'')::text'), true);
+select is(
+  (select count(*) from public.notifications
+    where audience = 'customer' and category = 'points'
+      and source_id = (current_setting('app.nt_sale', true)::jsonb ->> 'sale_id')::uuid)::int,
+  1,
+  'NT1: a sale''s points award notifies the customer exactly once'
+);
+select is(
+  (select source_type from public.notifications
+    where source_id = (current_setting('app.nt_sale', true)::jsonb ->> 'sale_id')::uuid
+      and category = 'points'),
+  'points_ledger',
+  'NT1: the notification carries a payload reference'
+);
+select ok(
+  (select count(*) from public.notifications
+    where audience = 'business' and category = 'rule') >= 1,
+  'NT1: a loyalty rule change notifies the business'
+);
+select is(
+  (select count(*) from public.notifications
+    where category = 'rule' and (metadata ->> 'version')::int = 1)::int,
+  0,
+  'NT1: the launch policy installed at signup is not news'
+);
+select ok(
+  (select count(*) from public.notifications
+    where audience = 'business' and category = 'staff' and min_role = 'owner') >= 1,
+  'NT1: a staff invitation notifies the owner'
+);
+
+-- NT2: recipients see only what they are authorized to see.
+select ok(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.notifications') >= 1,
+  'NT2: the customer sees their own notifications'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.notifications where audience = ''business'''),
+  0::bigint,
+  'NT2: a customer never sees business notifications'
+);
+select is(
+  extensions.count_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    'select count(*) from public.notifications
+      where customer_membership_id =
+        (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1'')'),
+  0::bigint,
+  'NT2: one customer cannot read another customer''s notifications'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.notifications where min_role = ''owner'''),
+  0::bigint,
+  'NT2: a cashier cannot read owner-scoped notifications'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.notifications where audience = ''customer'''),
+  0::bigint,
+  'NT2: a cashier cannot read customer notifications'
+);
+select ok(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select count(*) from public.notifications where min_role = ''owner''') >= 1,
+  'NT2: the owner sees owner-scoped notifications'
+);
+
+-- NT3: cross-tenant and cross-store denial.
+select lives_ok(
+  $$insert into public.notifications
+      (business_id, store_id, audience, min_role, category, title, dedupe_key)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000002',
+            'business', 'staff', 'stock', 'Satellite-only alert', 'pgtap-nt3')$$,
+  'NT3: seed a satellite-store alert as the maintenance role'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.notifications where dedupe_key = ''pgtap-nt3'''),
+  0::bigint,
+  'NT3: store scoping hides another store''s alert from scoped staff'
+);
+select is(
+  extensions.count_as('authenticated', '44444444-4444-4444-8444-444444444444',
+    'select count(*) from public.notifications where dedupe_key = ''pgtap-nt3'''),
+  1::bigint,
+  'NT3: the assigned cashier does see their store''s alert'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.mark_notification_read(
+       (select id from public.notifications where dedupe_key = ''pgtap-nt3''))'),
+  '42501',
+  'NT3: an out-of-scope notification cannot be marked read'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.notifications
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  0::bigint,
+  'NT3: notifications never cross tenants'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'insert into public.notifications (business_id, audience, min_role, category, title, dedupe_key)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''business'', ''staff'', ''system'',
+             ''Fake'', ''pgtap-fake'')'),
+  '42501',
+  'NT3: even the owner cannot write a notification directly'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.notify_emit(''aaaaaaaa-0000-4000-8000-000000000001'',
+       ''business'', ''system'', ''Fake'', ''pgtap-fake2'')'),
+  '42501',
+  'NT3: notify_emit is internal, not a client API'
+);
+
+-- NT4: read state is personal, persistent and idempotent.
+select is(
+  extensions.text_as('authenticated', '44444444-4444-4444-8444-444444444444',
+    'select public.mark_notification_read(
+       (select id from public.notifications where dedupe_key = ''pgtap-nt3''))::text'),
+  'true',
+  'NT4: the assigned cashier can mark their alert read'
+);
+select is(
+  (select count(*) from public.notification_reads r
+     join public.notifications n on n.id = r.notification_id
+    where n.dedupe_key = 'pgtap-nt3')::int,
+  1,
+  'NT4: exactly one read row exists'
+);
+select is(
+  extensions.text_as('authenticated', '44444444-4444-4444-8444-444444444444',
+    'select public.mark_notification_read(
+       (select id from public.notifications where dedupe_key = ''pgtap-nt3''))::text'),
+  'true',
+  'NT4: marking read twice is idempotent, not an error'
+);
+select is(
+  (select count(*) from public.notification_reads r
+     join public.notifications n on n.id = r.notification_id
+    where n.dedupe_key = 'pgtap-nt3')::int,
+  1,
+  'NT4: the duplicate mark-read added no second row'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select count(*) from public.notification_reads'),
+  0::bigint,
+  'NT4: read state is personal — the owner sees none of the cashier''s'
+);
+select ok(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.mark_all_notifications_read(''business'')') >= 1,
+  'NT4: mark-all reports how many rows it changed'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.unread_notification_count(''business'')'),
+  0::bigint,
+  'NT4: the business bell is empty after mark-all'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.mark_all_notifications_read(''business'')'),
+  0::bigint,
+  'NT4: a second mark-all is a no-op'
+);
+select ok(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.unread_notification_count(''customer'')') >= 1,
+  'NT4: the business mark-all did not clear the customer bell'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'insert into public.notification_reads (notification_id, profile_id)
+     select id, ''88888888-8888-4888-8888-888888888888'' from public.notifications limit 1'),
+  '42501',
+  'NT4: a read row cannot be forged for another profile'
+);
+
+-- NT5: duplicates and replays never produce a second row.
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(
+       ''bbbbbbbb-0000-4000-8000-000000000001'',
+       ''[{"name":"Conduit pipe","qty":1,"unit_price_paise":60000}]''::jsonb,
+       ''[{"method":"cash","amount_paise":60000}]''::jsonb,
+       (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1''),
+       0, ''pgtap-nt1'') ->> ''replayed'''),
+  'true',
+  'NT5: the same idempotency key replays the stored sale'
+);
+select is(
+  (select count(*) from public.notifications
+    where audience = 'customer' and category = 'points'
+      and source_id = (current_setting('app.nt_sale', true)::jsonb ->> 'sale_id')::uuid)::int,
+  1,
+  'NT5: the replay emitted no second notification'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'insert into public.notifications (business_id, audience, min_role, category, title, dedupe_key)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''business'', ''staff'', ''system'',
+             ''Dup'', ''pgtap-nt3'')'),
+  '23505',
+  'NT5: the dedupe key is a hard constraint'
+);
+select is(
+  (select public.notify_emit('aaaaaaaa-0000-4000-8000-000000000001', 'business', 'system',
+     'Dup', 'pgtap-nt3', null, null, 'staff')),
+  null::uuid,
+  'NT5: notify_emit swallows a duplicate instead of aborting its caller'
+);
+
+-- NT6: low stock only where configured, only on the crossing.
+select lives_ok(
+  $$update public.inventory_by_store set reorder_level = 0, on_hand = 100
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: clear the reorder level for the probe product'
+);
+select set_config('app.nt_stock_before',
+  (select count(*) from public.notifications where category = 'stock')::text, true);
+select lives_ok(
+  $$update public.inventory_by_store set on_hand = 1
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: drop the stock with no threshold configured'
+);
+select is(
+  (select count(*) from public.notifications where category = 'stock')::int,
+  current_setting('app.nt_stock_before', true)::int,
+  'NT6: no alert when the business has not configured a reorder level'
+);
+select lives_ok(
+  $$update public.inventory_by_store set reorder_level = 10, on_hand = 50
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: configure a reorder level'
+);
+select lives_ok(
+  $$update public.inventory_by_store set on_hand = 8
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: cross the reorder level'
+);
+select is(
+  (select count(*) from public.notifications where category = 'stock')::int,
+  current_setting('app.nt_stock_before', true)::int + 1,
+  'NT6: crossing the reorder level raises exactly one alert'
+);
+select is(
+  (select distinct min_role::text from public.notifications
+    where category = 'stock' and dedupe_key like 'low-stock:%'),
+  'manager',
+  'NT6: low stock is a manager-scoped alert'
+);
+
+-- NT7: Realtime exposure and grants.
+select ok(
+  not has_table_privilege('anon', 'public.notifications', 'SELECT'),
+  'NT7: anonymous sockets cannot read notifications'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.notifications', 'INSERT')
+  and not has_table_privilege('authenticated', 'public.notifications', 'UPDATE')
+  and not has_table_privilege('authenticated', 'public.notifications', 'DELETE')
+  and not has_table_privilege('authenticated', 'public.notification_reads', 'INSERT'),
+  'NT7: notifications are trigger-written and RPC-read only'
+);
+select is(
+  (select count(*) from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public'
+      and tablename = 'notification_reads')::int,
+  0,
+  'NT7: personal read state is never published to Realtime'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Catalogue images + essential settings (20260906190000_storage_and_settings.sql)
+-- Mirrors cases ST1-ST4 / SET1-SET4 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+select set_config('app.st_prod',
+  (select id::text from public.products
+    where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' order by sku limit 1), true);
+
+-- ST1: manager attaches; every validation rule bites.
+select set_config('app.st_img',
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/%s/a.webp'', ''image/webp'',
+              120000, 800, 800, ''Nine watt LED bulb'')::text',
+           current_setting('app.st_prod', true), current_setting('app.st_prod', true))), true);
+select is(
+  current_setting('app.st_img', true)::jsonb ->> 'is_primary', 'true',
+  'ST1: the first image becomes the thumbnail'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/b.svg'', ''image/svg+xml'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: SVG is refused (it can carry script)'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/c.jpg'', ''image/jpeg'', 99999999)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: an oversized upload is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000002/x/d.jpg'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: a path under another tenant''s folder is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/../../etc/passwd'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: path traversal is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''reward-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/e.jpg'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '22023',
+  'ST1: a product cannot be filed in the reward bucket'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.attach_catalogue_image(null, null, ''product-images'',
+       ''aaaaaaaa-0000-4000-8000-000000000001/x/f.jpg'', ''image/jpeg'', 1000)'),
+  '22023',
+  'ST1: an image must belong to exactly one product or reward'
+);
+select is(
+  (select count(*) from public.catalogue_images
+    where product_id = current_setting('app.st_prod', true)::uuid)::int,
+  1,
+  'ST1: no rejected upload left a row behind'
+);
+
+-- ST2: authorization and tenancy.
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select count(*) from public.catalogue_images
+             where product_id = %L', current_setting('app.st_prod', true))),
+  1::bigint,
+  'ST2: cashiers may look at catalogue images'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/x/staff.jpg'', ''image/jpeg'', 1000)',
+           current_setting('app.st_prod', true))),
+  '42501',
+  'ST2: a cashier cannot attach an image'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.catalogue_images
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  0::bigint,
+  'ST2: catalogue images never cross tenants'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select count(*) from public.catalogue_images
+             where product_id = %L', current_setting('app.st_prod', true))),
+  0::bigint,
+  'ST2: customers cannot browse product images yet'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    format('insert into public.catalogue_images
+             (business_id, product_id, bucket, path, mime_type, size_bytes)
+            values (''aaaaaaaa-0000-4000-8000-000000000001'', %L, ''product-images'',
+                    ''aaaaaaaa-0000-4000-8000-000000000001/direct.jpg'', ''image/jpeg'', 100)',
+           current_setting('app.st_prod', true))),
+  '42501',
+  'ST2: even the owner cannot insert an image row directly'
+);
+
+-- ST3: thumbnail, alt text, detach.
+select set_config('app.st_img2',
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.attach_catalogue_image(%L, null, ''product-images'',
+              ''aaaaaaaa-0000-4000-8000-000000000001/%s/second.png'', ''image/png'',
+              90000, 600, 600, ''Side view'', true)::text',
+           current_setting('app.st_prod', true), current_setting('app.st_prod', true))), true);
+select is(
+  (select count(*) from public.catalogue_images
+    where product_id = current_setting('app.st_prod', true)::uuid and is_primary)::int,
+  1,
+  'ST3: exactly one thumbnail survives a second upload'
+);
+select is(
+  (select is_primary from public.catalogue_images
+    where id = (current_setting('app.st_img2', true)::jsonb ->> 'image_id')::uuid),
+  true,
+  'ST3: make_primary moved the thumbnail'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    format('update public.catalogue_images set is_primary = true where id = %L',
+           current_setting('app.st_img', true)::jsonb ->> 'image_id')),
+  '23505',
+  'ST3: two thumbnails are impossible, not merely discouraged'
+);
+select is(
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.set_catalogue_image_alt(%L, ''  Front view  '')::text',
+           current_setting('app.st_img', true)::jsonb ->> 'image_id')),
+  'true',
+  'ST3: alt text is editable without re-uploading'
+);
+select is(
+  (select alt_text from public.catalogue_images
+    where id = (current_setting('app.st_img', true)::jsonb ->> 'image_id')::uuid),
+  'Front view',
+  'ST3: alt text is trimmed on the way in'
+);
+select is(
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.detach_catalogue_image(%L) ->> ''bucket''',
+           current_setting('app.st_img2', true)::jsonb ->> 'image_id')),
+  'product-images',
+  'ST3: detach returns the storage coordinates so the object can be removed'
+);
+select is(
+  (select is_primary from public.catalogue_images
+    where id = (current_setting('app.st_img', true)::jsonb ->> 'image_id')::uuid),
+  true,
+  'ST3: deleting the thumbnail promotes a survivor'
+);
+
+-- SET1: business identity.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.update_business_profile(''Hijacked'')'),
+  '42501',
+  'SET1: a manager cannot edit the business profile'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.update_business_profile(null, null, null, ''not-an-email'')'),
+  '22023',
+  'SET1: a malformed support email is refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.update_business_profile(null, null, ''NOTAGSTIN'')'),
+  '22023',
+  'SET1: a malformed GSTIN is refused'
+);
+select lives_ok(
+  $$select extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+      'select public.update_business_profile(''Ambika Electricals & Sons'')::text')$$,
+  'SET1: the owner can rename the business'
+);
+select is(
+  (select name from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000001'),
+  'Ambika Electricals & Sons',
+  'SET1: the new name is stored'
+);
+select ok(
+  (select count(*) from public.audit_logs
+    where action = 'business.profile_updated'
+      and metadata -> 'from' ->> 'name' = 'Ambika Electricals') >= 1,
+  'SET1: the change is audited with the previous value'
+);
+
+-- SET2: stores.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.upsert_store(null, ''Manager Store'')'),
+  '42501',
+  'SET2: a manager cannot create a store'
+);
+select set_config('app.st_store',
+  extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.upsert_store(null, ''Karelibaug Counter'', ''KRB'')::text'), true);
+select is(
+  current_setting('app.st_store', true)::jsonb ->> 'created', 'true',
+  'SET2: the owner can open a store'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.upsert_store(''bbbbbbbb-0000-4000-8000-000000000009'', ''Steal'')'),
+  '22023',
+  'SET2: another tenant''s store id looks exactly like a missing one'
+);
+select lives_ok(
+  $$select extensions.text_as('authenticated', '88888888-8888-4888-8888-888888888888',
+      format('select public.upsert_store(%L, null, null, null, null, false)::text',
+             current_setting('app.st_store', true)::jsonb ->> 'store_id'))$$,
+  'SET2: closing a store is a status flip'
+);
+select is(
+  (select is_active from public.stores
+    where id = (current_setting('app.st_store', true)::jsonb ->> 'store_id')::uuid),
+  false,
+  'SET2: the store is closed but still present for history'
+);
+select is(
+  (select name from public.stores
+    where id = (current_setting('app.st_store', true)::jsonb ->> 'store_id')::uuid),
+  'Karelibaug Counter',
+  'SET2: closing did not blank the other fields'
+);
+
+-- SET3: notification preferences.
+select lives_ok(
+  $$select extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+      'select public.set_notification_preferences(
+         ''aaaaaaaa-0000-4000-8000-000000000001'', array[''stock'', ''rule''])::text')$$,
+  'SET3: a cashier can mute categories for their business'
+);
+select is(
+  (select array_to_string(muted_categories, ',') from public.notification_preferences
+    where profile_id = '33333333-3333-4333-8333-333333333333'),
+  'stock,rule',
+  'SET3: the preference is stored'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.set_notification_preferences(
+       ''aaaaaaaa-0000-4000-8000-000000000001'', array[''security''])'),
+  '22023',
+  'SET3: security notifications can never be muted'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select public.set_notification_preferences(
+       ''aaaaaaaa-0000-4000-8000-000000000001'', array[''stock''])'),
+  '42501',
+  'SET3: an outsider cannot set preferences for another tenant'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select count(*) from public.notification_preferences'),
+  0::bigint,
+  'SET3: preferences are private to their owner'
+);
+
+-- SET4: grants.
+select ok(
+  not has_function_privilege('anon',
+    'public.attach_catalogue_image(uuid, uuid, text, text, text, bigint, integer, integer, text, boolean)', 'EXECUTE')
+  and not has_function_privilege('anon',
+    'public.update_business_profile(text, text, text, text, text)', 'EXECUTE')
+  and not has_function_privilege('anon',
+    'public.set_notification_preferences(uuid, text[])', 'EXECUTE'),
+  'SET4: anon cannot call any settings RPC'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.catalogue_images', 'INSERT')
+  and not has_table_privilege('authenticated', 'public.catalogue_images', 'DELETE')
+  and not has_table_privilege('authenticated', 'public.notification_preferences', 'INSERT'),
+  'SET4: settings tables are RPC-write-only'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Hardening (20260906210000_revoke_trigger_function_execute.sql)
+-- ---------------------------------------------------------------------------
+select is(
+  (select count(*)::int
+     from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+    where ns.nspname = 'public'
+      and p.prorettype = 'pg_catalog.trigger'::regtype
+      and (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+        or has_function_privilege('anon', p.oid, 'EXECUTE'))),
+  0,
+  'HD1: no trigger function is EXECUTE-able by an API role'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'update public.points_ledger set points = 1 where source_type = ''sale'''),
+  '42501',
+  'HD1: the ledger append-only trigger still fires after the revoke'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.loyalty_rule_versions set earn_points = 999 where version = 1'),
+  '42501',
+  'HD1: the rule immutability trigger still fires after the revoke'
 );
 
 select * from finish();

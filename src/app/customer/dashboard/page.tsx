@@ -18,6 +18,7 @@ import { ProductArt } from "@/components/shared/product-art";
 import { StatsSkeleton } from "@/components/shared/loading-skeleton";
 import { useCurrentCustomer, useStore } from "@/lib/store";
 import { LivePointsCard } from "@/components/customer/live-points-card";
+import { LiveMembershipQr } from "@/components/customer/live-membership-qr";
 import { isSupabaseConfigured } from "@/lib/auth/env";
 import { meetsTier } from "@/lib/points";
 import { cn, formatNumber, relativeTime } from "@/lib/utils";
@@ -68,6 +69,7 @@ export default function CustomerDashboard() {
       </header>
 
       {/* Live Supabase loyalty — renders only when auth is configured */}
+      <LiveMembershipQr />
       <LivePointsCard />
 
       {isSupabaseConfigured() && (
