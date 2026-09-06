@@ -47,3 +47,21 @@ export function isDemoAuthEnabled(): boolean {
   if (!isSupabaseConfigured()) return true;
   return process.env.NODE_ENV !== "production" && process.env.NEXT_PUBLIC_DEMO_AUTH === "true";
 }
+
+/**
+ * Internal developer/preview tooling — the persona switcher and the
+ * "reset demo data" control (MVP hotfix §"Remove visible Demo Mode").
+ *
+ * This is deliberately STRICTER than {@link isDemoAuthEnabled}: it is OFF by
+ * default everywhere, including local demo runs, so the persona switcher never
+ * appears in normal user-facing chrome (headers, account menus, sidebars,
+ * mobile navigation). A developer opts in explicitly with
+ * `NEXT_PUBLIC_DEMO_DEVTOOLS=true` in a non-production build.
+ *
+ * It must never act as an authorization path: the switcher only mutates the
+ * local mock store, and every real route/data boundary is enforced by the
+ * server guards in `src/lib/auth/session.ts` plus RLS.
+ */
+export function isDemoDevToolsEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" && process.env.NEXT_PUBLIC_DEMO_DEVTOOLS === "true";
+}

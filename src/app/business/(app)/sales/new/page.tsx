@@ -312,7 +312,7 @@ export default function NewSalePage() {
               ) : (
                 // Nested scrolling only on lg+, where the cart sits alongside.
                 // Below lg the grid grows and the page scrolls normally.
-                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:max-h-[540px] lg:overflow-y-auto lg:overscroll-contain lg:pr-1 xl:grid-cols-4">
+                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:scroll-region lg:max-h-[540px] lg:pr-1 xl:grid-cols-4">
                   {filtered.map((p) => {
                     const qty = cart[p.id] ?? 0;
                     return (

@@ -29,6 +29,10 @@
     --ring: 218 92% 55%;
     --radius: 0.75rem;
 
+    /* Desktop sidebar width — flipped by the persisted collapse preference
+       (see src/hooks/use-sidebar.ts). Only consumed at the `lg` breakpoint. */
+    --sidebar-w: 248px;
+
     /* Scrollbar system — quiet neutral, brand-consistent */
     --scrollbar-size: 11px;
     --scrollbar-track: 214 32% 96%;
@@ -70,6 +74,11 @@
 }
 
 @layer base {
+  /* Collapsed desktop rail — applied to <html> before first paint. */
+  html.sidebar-collapsed {
+    --sidebar-w: 72px;
+  }
+
   * {
     @apply border-border;
   }
@@ -87,8 +96,20 @@
 
 /* ---------------------------------------------------------------------------
    Premium scrollbar system
-   Applied only on precise-pointer devices; touch devices keep native,
-   momentum-friendly overlay scrollbars.
+   ---------------------------------------------------------------------------
+   Scope: precise-pointer devices only. Touch devices keep the native,
+   momentum-friendly overlay scrollbars (`@media (pointer: fine)` never
+   matches there), so nothing below affects phones/tablets.
+
+   Scroll owners audited and covered:
+     • the document (html/body)
+     • sidebars / nav rails            → `.scroll-region`
+     • dialog + sheet bodies           → DialogBody / SheetBody (`.scroll-region`)
+     • command palette list            → CommandList (`.scroll-region`)
+     • tables and horizontal strips    → `.scroll-region-x`, Table wrapper
+     • forms, custom lists, image picker → `.scroll-region`
+   Scrolling is never hidden and no nested scroll traps are introduced —
+   `.no-scrollbar` remains reserved for chrome-less snap strips.
    --------------------------------------------------------------------------- */
 @media (pointer: fine) {
   @supports (scrollbar-width: thin) {
@@ -96,9 +117,15 @@
       scrollbar-width: thin;
       scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track) / 0.55);
     }
+    /* Firefox has no :hover state for scrollbars — keep a legible resting
+       colour on every scroll owner instead. */
     * {
       scrollbar-width: thin;
       scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
+    }
+    .scroll-region,
+    .scroll-region-x {
+      scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track) / 0.4);
     }
   }
 
@@ -130,6 +157,27 @@
   html::-webkit-scrollbar-track {
     background: hsl(var(--scrollbar-track) / 0.55);
   }
+
+  /* Declared scroll owners: slightly narrower bar, faint inset track that only
+     becomes visible while the region is hovered or actively scrolled. */
+  .scroll-region::-webkit-scrollbar,
+  .scroll-region-x::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .scroll-region::-webkit-scrollbar-track,
+  .scroll-region-x::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 999px;
+  }
+  .scroll-region:hover::-webkit-scrollbar-track,
+  .scroll-region-x:hover::-webkit-scrollbar-track {
+    background: hsl(var(--scrollbar-track) / 0.5);
+  }
+  .scroll-region::-webkit-scrollbar-thumb,
+  .scroll-region-x::-webkit-scrollbar-thumb {
+    border-width: 2.5px;
+  }
 }
 
 @layer utilities {
@@ -156,6 +204,14 @@
     overflow-x: auto;
     overscroll-behavior-x: contain;
     -webkit-overflow-scrolling: touch;
+  }
+  /*
+   * Scroll owners must not become scroll TRAPS: a region that is not actually
+   * overflowing should pass the gesture straight to the page.
+   */
+  .scroll-region:not(:has(> *)),
+  .scroll-region-x:not(:has(> *)) {
+    overscroll-behavior: auto;
   }
   /*
    * When validation moves focus to a field inside a scroll region, the browser

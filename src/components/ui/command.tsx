@@ -3,7 +3,7 @@ import * as React from "react";
 import { Command as CommandPrimitive } from "cmdk";
 import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 
 const Command = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive>,
@@ -13,10 +13,24 @@ const Command = React.forwardRef<
 ));
 Command.displayName = CommandPrimitive.displayName;
 
-const CommandDialog = ({ children, ...props }: React.ComponentProps<typeof Dialog>) => (
+const CommandDialog = ({
+  children,
+  shouldFilter,
+  label = "Global search",
+  ...props
+}: React.ComponentProps<typeof Dialog> & {
+  /** Pass `false` when results are already ranked/filtered server-side. */
+  shouldFilter?: boolean;
+  label?: string;
+}) => (
   <Dialog {...props}>
     <DialogContent className="overflow-hidden p-0 max-w-2xl" hideClose>
-      <Command className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-muted-foreground">
+      <DialogTitle className="sr-only">{label}</DialogTitle>
+      <Command
+        label={label}
+        shouldFilter={shouldFilter}
+        className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-muted-foreground"
+      >
         {children}
       </Command>
     </DialogContent>
@@ -42,7 +56,7 @@ const CommandList = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive.List>,
   React.ComponentPropsWithoutRef<typeof CommandPrimitive.List>
 >(({ className, ...props }, ref) => (
-  <CommandPrimitive.List ref={ref} className={cn("max-h-[60vh] overflow-y-auto overflow-x-hidden p-1.5", className)} {...props} />
+  <CommandPrimitive.List ref={ref} className={cn("scroll-region max-h-[60vh] overflow-x-hidden p-1.5", className)} {...props} />
 ));
 CommandList.displayName = CommandPrimitive.List.displayName;
 

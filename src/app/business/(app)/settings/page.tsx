@@ -14,6 +14,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
+import { InstallAppAction } from "@/components/shared/install-app-action";
+import { isDemoDevToolsEnabled } from "@/lib/auth/env";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { tiers } from "@/lib/mock-data/business";
@@ -23,6 +25,9 @@ export default function SettingsPage() {
   const { reset } = useStore();
   const { business } = useServices();
   const [resetOpen, setResetOpen] = React.useState(false);
+  // Reset-demo-data is a development/preview control only — never a
+  // production affordance (MVP hotfix §"Remove visible Demo Mode").
+  const devTools = isDemoDevToolsEnabled();
 
   const [profile, setProfile] = React.useState({
     name: business.name, owner: business.ownerName, gst: business.gst,
@@ -91,16 +96,20 @@ export default function SettingsPage() {
             </div>
           </Card>
 
-          <Card className="p-5">
-            <h2 className="text-sm font-semibold">Danger zone</h2>
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
-              <div>
-                <p className="text-sm font-medium">Reset demo data</p>
-                <p className="text-xs text-muted-foreground">Restores all mock customers, sales, rewards and points to their original state.</p>
+          {devTools && (
+            <Card className="p-5">
+              <h2 className="text-sm font-semibold">Developer tools</h2>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+                <div>
+                  <p className="text-sm font-medium">Reset demo data</p>
+                  <p className="text-xs text-muted-foreground">
+                    Development/preview only. Restores the local mock customers, sales, rewards and points.
+                  </p>
+                </div>
+                <Button variant="destructive" onClick={() => setResetOpen(true)}><RotateCcw /> Reset data</Button>
               </div>
-              <Button variant="destructive" onClick={() => setResetOpen(true)}><RotateCcw /> Reset data</Button>
-            </div>
-          </Card>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="tiers" className="mt-4">
@@ -163,6 +172,9 @@ export default function SettingsPage() {
                 <p className="text-xs text-muted-foreground">Choose light, dark or match your system setting.</p>
               </div>
               <ThemeToggle />
+            </div>
+            <div className="mt-3 rounded-lg border p-4">
+              <InstallAppAction />
             </div>
           </Card>
         </TabsContent>
