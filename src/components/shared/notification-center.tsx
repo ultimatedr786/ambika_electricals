@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -23,7 +24,7 @@ import { useServices } from "@/lib/services";
 import { cn, relativeTime } from "@/lib/utils";
 import type { AppNotification } from "@/types";
 
-const icons: Record<string, { icon: React.ElementType; color: string; bg: string }> = {
+const icons: Record<string, { icon: LucideIcon; color: string; bg: string }> = {
   points: { icon: Zap, color: "text-sky-500", bg: "bg-sky-500/10" },
   reward: { icon: Gift, color: "text-amber-500", bg: "bg-amber-500/10" },
   tier: { icon: TrendingUp, color: "text-purple-500", bg: "bg-purple-500/10" },

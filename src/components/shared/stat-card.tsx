@@ -1,4 +1,5 @@
 "use client";
+import type { LucideIcon } from "lucide-react";
 import { motion } from "framer-motion";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -16,7 +17,7 @@ export function StatCard({
   label: string;
   value: string;
   delta?: number;
-  icon?: React.ElementType;
+  icon?: LucideIcon;
   hint?: string;
   index?: number;
   className?: string;

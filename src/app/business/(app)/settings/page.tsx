@@ -28,7 +28,7 @@ export default function SettingsPage() {
     name: business.name, owner: business.ownerName, gst: business.gst,
     phone: business.phone, email: business.email, address: business.address,
   });
-  const [earn, setEarn] = React.useState({ spend: business.earnRate.spend, points: business.earnRate.points, pointValue: business.pointValue, expiryMonths: 12, minRedeem: 500 });
+  const [earn, setEarn] = React.useState({ spend: business.earnRate.spend, points: business.earnRate.points, pointValue: business.pointValue, minRedeem: 500 });
   const [notify, setNotify] = React.useState({ lowStock: true, dailySummary: true, newMember: true, redemption: true, campaignEnd: false });
 
   return (
@@ -71,7 +71,12 @@ export default function SettingsPage() {
               <NumField label="Spend threshold (₹)" value={earn.spend} onChange={(v) => setEarn({ ...earn, spend: v })} />
               <NumField label="Points awarded" value={earn.points} onChange={(v) => setEarn({ ...earn, points: v })} />
               <NumField label="Minimum points to redeem" value={earn.minRedeem} onChange={(v) => setEarn({ ...earn, minRedeem: v })} />
-              <NumField label="Points expire after (months)" value={earn.expiryMonths} onChange={(v) => setEarn({ ...earn, expiryMonths: v })} />
+              <div className="rounded-lg border border-dashed p-3">
+                <p className="text-sm font-medium">Points expiry</p>
+                <p className="mt-0.5 text-[13px] text-muted-foreground">
+                  None — points never expire under the launch loyalty policy.
+                </p>
+              </div>
             </div>
             <Separator className="my-4" />
             <div className="rounded-lg border bg-muted/30 p-4 text-sm">

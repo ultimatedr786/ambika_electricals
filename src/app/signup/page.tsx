@@ -7,13 +7,19 @@ export const metadata: Metadata = {
   description: "Create your Ambika Electricals membership in minutes.",
 };
 
-export default function SignupPage() {
+export default async function SignupPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ next?: string }>;
+}) {
+  const params = await searchParams;
+
   return (
     <AuthShell
       headline="Start earning rewards"
       subheadline="Create your Ambika Electricals membership in minutes."
     >
-      <SignupForm />
+      <SignupForm next={params.next ?? null} />
     </AuthShell>
   );
 }

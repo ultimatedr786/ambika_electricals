@@ -19,6 +19,8 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { initials, relativeTime } from "@/lib/utils";
+import { LiveTeamPanel } from "@/components/business/live-team-panel";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import type { StaffMember } from "@/types";
 
 const roles: StaffMember["role"][] = ["Owner", "Manager", "Cashier", "Marketing"];
@@ -62,6 +64,18 @@ export default function StaffPage() {
         description="Team members who can operate the rewards programme."
         actions={<Button onClick={() => setOpen(true)}><UserPlus /> Invite Staff</Button>}
       />
+
+      {/* Live Supabase team & invitations — renders only when auth is configured */}
+      <LiveTeamPanel />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2 pt-1">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype roster</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data — migrates in a later slice
+          </span>
+        </div>
+      )}
 
       <SearchInput value={query} onChange={setQuery} placeholder="Search staff by name, email or role" className="max-w-md" />
 

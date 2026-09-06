@@ -19,6 +19,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { DemoSwitcher } from "@/components/shared/demo-switcher";
+import { createClient as createBrowserSupabaseClient } from "@/lib/supabase/client";
+import { isDemoAuthEnabled } from "@/lib/auth/env";
 import { NotificationCenter } from "@/components/shared/notification-center";
 import { useCurrentCustomer } from "@/lib/store";
 import { useServices } from "@/lib/services";
@@ -52,6 +54,8 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
   const { authService, cartService } = useServices();
   const prefetch = usePrefetchOnIntent();
   const [signOutOpen, setSignOutOpen] = React.useState(false);
+  const supabase = React.useMemo(() => createBrowserSupabaseClient(), []);
+  const demoEnabled = isDemoAuthEnabled();
 
   const cartCount = cartService.count;
 
@@ -114,7 +118,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
         <div className="safe-top flex h-14 items-center gap-2 px-4 sm:h-16 sm:px-6">
           <Link href="/customer/dashboard" className="lg:hidden"><Logo size={28} showTagline={false} /></Link>
           <div className="ml-auto flex items-center gap-1">
-            <DemoSwitcher />
+            {demoEnabled && <DemoSwitcher />}
             <Button asChild variant="ghost" size="icon-sm" className="relative" aria-label={`Rewards basket, ${cartCount} items`}>
               <Link href="/customer/rewards/cart">
                 <ShoppingBag className="size-[18px]" />
@@ -211,8 +215,17 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
         description="You'll need to sign in again to view your points and rewards."
         confirmLabel="Sign out"
         onConfirm={() => {
-          authService.signOut();
-          router.push("/login");
+          // Real session first (server-side revocation via Supabase), then the
+          // mock/demo state so the prototype journey resets identically.
+          void (async () => {
+            try {
+              if (supabase) await supabase.auth.signOut();
+            } finally {
+              authService.signOut();
+              router.push("/login");
+              router.refresh();
+            }
+          })();
         }}
       />
     </div>

@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -172,7 +173,7 @@ export default function ProfilePage() {
   );
 }
 
-function Detail({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: string }) {
+function Detail({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
   return (
     <div className="flex items-start gap-3">
       <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
@@ -198,7 +199,7 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
 
 function LinkRow({
   icon: Icon, label, hint, onClick, destructive,
-}: { icon: React.ElementType; label: string; hint?: string; onClick: () => void; destructive?: boolean }) {
+}: { icon: LucideIcon; label: string; hint?: string; onClick: () => void; destructive?: boolean }) {
   return (
     <button
       type="button"

@@ -24,6 +24,8 @@ import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle, SheetTrigger }
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { DemoSwitcher } from "@/components/shared/demo-switcher";
+import { createClient as createBrowserSupabaseClient } from "@/lib/supabase/client";
+import { isDemoAuthEnabled } from "@/lib/auth/env";
 /**
  * cmdk + the palette's icon set are only needed once the user actually opens
  * search (⌘K / the header button), so the chunk is fetched on first open
@@ -67,7 +69,19 @@ const mobileNav = [
   { href: "/business/customers", label: "Customers", icon: Users },
 ];
 
-export function BusinessShell({ children }: { children: React.ReactNode }) {
+export type LiveBusinessRole = "owner" | "manager" | "staff" | "super_admin";
+
+/** Owner-only sections — hidden from managers/staff in nav, palette and routes. */
+const OWNER_ONLY_HREFS = ["/business/staff", "/business/settings"];
+
+export function BusinessShell({
+  children,
+  liveRole = null,
+}: {
+  children: React.ReactNode;
+  /** Real Supabase membership role (null in Demo mode → full prototype nav). */
+  liveRole?: LiveBusinessRole | null;
+}) {
   const pathname = usePathname();
   const router = useRouter();
   const { authService } = useServices();
@@ -77,6 +91,15 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
   const paletteMounted = React.useRef(false);
   if (paletteOpen) paletteMounted.current = true;
   const [signOutOpen, setSignOutOpen] = React.useState(false);
+  const supabase = React.useMemo(() => createBrowserSupabaseClient(), []);
+  const demoEnabled = isDemoAuthEnabled();
+  const ownerRestricted = liveRole !== null && liveRole !== "owner" && liveRole !== "super_admin";
+  const visibleNav = React.useMemo(() => {
+    if (!ownerRestricted) return nav;
+    return nav
+      .map((g) => ({ ...g, items: g.items.filter((i) => !OWNER_ONLY_HREFS.includes(i.href)) }))
+      .filter((g) => g.items.length > 0);
+  }, [ownerRestricted]);
   const [moreOpen, setMoreOpen] = React.useState(false);
 
   React.useEffect(() => {
@@ -103,7 +126,7 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
           <Button asChild className="w-full"><Link href="/business/sales/new"><Plus /> New Sale</Link></Button>
         </div>
         <nav className="scroll-region flex-1 px-3 py-2" aria-label="Business navigation">
-          {nav.map((group) => (
+          {visibleNav.map((group) => (
             <div key={group.group} className="mb-3">
               <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 {group.group}
@@ -165,7 +188,7 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
             <Button variant="ghost" size="icon-sm" className="lg:hidden" onClick={() => setPaletteOpen(true)} aria-label="Search">
               <Search className="size-[18px]" />
             </Button>
-            <DemoSwitcher />
+            {demoEnabled && <DemoSwitcher />}
             <NotificationCenter />
             <Tooltip>
               <TooltipTrigger asChild>
@@ -245,7 +268,7 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
               <SheetContent side="bottom" className="max-h-[86dvh]">
                 <SheetHeader><SheetTitle>All sections</SheetTitle></SheetHeader>
                 <SheetBody className="pb-8">
-                  {nav.map((g) => (
+                  {visibleNav.map((g) => (
                     <div key={g.group} className="mb-4">
                       <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{g.group}</p>
                       <div className="grid grid-cols-2 gap-2">
@@ -287,14 +310,24 @@ export function BusinessShell({ children }: { children: React.ReactNode }) {
         </Button>
       )}
 
-      {paletteMounted.current && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />}
+      {paletteMounted.current && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} hiddenHrefs={ownerRestricted ? OWNER_ONLY_HREFS : []} />}
       <ConfirmDialog
         open={signOutOpen}
         onOpenChange={setSignOutOpen}
         title="Sign out of Rewardly?"
         description="You'll be returned to the sign-in screen."
         confirmLabel="Sign out"
-        onConfirm={() => { authService.signOut(); router.push("/login"); }}
+        onConfirm={() => {
+          void (async () => {
+            try {
+              if (supabase) await supabase.auth.signOut();
+            } finally {
+              authService.signOut();
+              router.push("/login");
+              router.refresh();
+            }
+          })();
+        }}
       />
     </div>
   );

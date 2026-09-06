@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -25,7 +26,7 @@ import { meetsTier } from "@/lib/points";
 import { cn, formatINR, formatNumber } from "@/lib/utils";
 import type { RewardRedemptionOption } from "@/types";
 
-const optionIcon: Record<string, React.ElementType> = {
+const optionIcon: Record<string, LucideIcon> = {
   points: Coins,
   points_cash: CreditCard,
   member_price: BadgeCheck,

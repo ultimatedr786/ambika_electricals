@@ -1,8 +1,9 @@
+import type { LucideIcon } from "lucide-react";
 import { Crown, Gem, Medal, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Tier } from "@/types";
 
-const map: Record<Tier, { icon: React.ElementType; className: string }> = {
+const map: Record<Tier, { icon: LucideIcon; className: string }> = {
   Bronze: { icon: Shield, className: "bg-amber-700/10 text-amber-700 dark:text-amber-500" },
   Silver: { icon: Medal, className: "bg-slate-400/15 text-slate-600 dark:text-slate-300" },
   Gold: { icon: Crown, className: "bg-amber-400/15 text-amber-600 dark:text-amber-400" },

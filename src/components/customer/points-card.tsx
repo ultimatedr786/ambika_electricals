@@ -150,9 +150,10 @@ export function PointsCard({ customer }: { customer: Customer }) {
             </div>
 
             <div className="rounded-xl border p-4">
-              <p className="text-sm font-medium">Expiring soon</p>
+              <p className="text-sm font-medium">Your points never expire</p>
               <p className="mt-1 text-[13px] text-muted-foreground">
-                420 points expire on 31 Dec 2026. Redeem them before they lapse.
+                Points stay in your account for as long as it&apos;s active — there are no use-it-or-lose-it deadlines.
+                (Redeemed reward vouchers do carry a short pickup window, shown on each voucher.)
               </p>
             </div>
           </SheetBody>

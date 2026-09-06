@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
@@ -16,6 +17,8 @@ import { RewardCard } from "@/components/customer/reward-card";
 import { ProductArt } from "@/components/shared/product-art";
 import { StatsSkeleton } from "@/components/shared/loading-skeleton";
 import { useCurrentCustomer, useStore } from "@/lib/store";
+import { LivePointsCard } from "@/components/customer/live-points-card";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import { meetsTier } from "@/lib/points";
 import { cn, formatNumber, relativeTime } from "@/lib/utils";
 
@@ -63,6 +66,18 @@ export default function CustomerDashboard() {
           <p className="mt-1 text-sm text-muted-foreground">Ambika Electricals · {customer.store}</p>
         </div>
       </header>
+
+      {/* Live Supabase loyalty — renders only when auth is configured */}
+      <LivePointsCard />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype dashboard</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data
+          </span>
+        </div>
+      )}
 
       <PointsCard customer={customer} />
 
@@ -206,7 +221,7 @@ export default function CustomerDashboard() {
   );
 }
 
-function QuickAction({ href, icon: Icon, label }: { href: string; icon: React.ElementType; label: string }) {
+function QuickAction({ href, icon: Icon, label }: { href: string; icon: LucideIcon; label: string }) {
   return (
     <Link
       href={href}

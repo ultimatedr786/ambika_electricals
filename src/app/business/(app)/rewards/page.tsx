@@ -24,6 +24,8 @@ import { TierBadge } from "@/components/shared/tier-badge";
 import { ProductArt } from "@/components/shared/product-art";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
+import { LiveRewardsPanel } from "@/components/business/live-rewards-panel";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import { cn, formatINR, formatNumber } from "@/lib/utils";
 import type { Reward, RewardType, Tier } from "@/types";
 
@@ -69,6 +71,18 @@ export default function BusinessRewardsPage() {
         description="Manage the catalogue your members redeem points against."
         actions={<Button onClick={() => setCreating(true)}><Plus /> Create Reward</Button>}
       />
+
+      {/* Live Supabase rewards & redemptions — renders only when auth is configured */}
+      <LiveRewardsPanel />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype rewards</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data — migrates in a later slice
+          </span>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="Total rewards" value={formatNumber(totals.total)} icon={Gift} />

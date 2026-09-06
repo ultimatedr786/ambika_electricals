@@ -1,5 +1,6 @@
 "use client";
 
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -346,7 +347,7 @@ function SuccessScreen({ redemption }: { redemption: Redemption }) {
 
 function FulfilOption({
   active, onClick, icon: Icon, title, body, note,
-}: { active: boolean; onClick: () => void; icon: React.ElementType; title: string; body: string; note: string }) {
+}: { active: boolean; onClick: () => void; icon: LucideIcon; title: string; body: string; note: string }) {
   return (
     <button
       type="button"
