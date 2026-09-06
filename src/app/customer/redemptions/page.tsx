@@ -16,6 +16,8 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { ProductArt } from "@/components/shared/product-art";
 import { QRCode } from "@/components/shared/qr-code";
 import { useCurrentCustomer, useStore } from "@/lib/store";
+import { LiveRedemptionsPanel } from "@/components/customer/live-redemptions-panel";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import { formatDate, formatINR, formatNumber } from "@/lib/utils";
 import type { Redemption } from "@/types";
 
@@ -39,6 +41,18 @@ export default function RedemptionsPage() {
   return (
     <div className="space-y-5">
       <PageHeader title="My redemptions" description="Track every reward you've unlocked." />
+
+      {/* Live Supabase redemption history — renders only when auth is configured */}
+      <LiveRedemptionsPanel />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype history</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data — migrates in a later slice
+          </span>
+        </div>
+      )}
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="w-full overflow-x-auto no-scrollbar sm:w-auto">

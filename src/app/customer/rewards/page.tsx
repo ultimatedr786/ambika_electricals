@@ -21,6 +21,8 @@ import { RewardCard } from "@/components/customer/reward-card";
 import { WaysToEarnSheet } from "@/components/customer/ways-to-earn";
 import { useCurrentCustomer, useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
+import { LiveRewardsStore } from "@/components/customer/live-rewards-store";
+import { isSupabaseConfigured } from "@/lib/auth/env";
 import { meetsTier, pointsToRupees } from "@/lib/points";
 import { cn, formatNumber } from "@/lib/utils";
 
@@ -155,6 +157,18 @@ export default function RewardsStorePage() {
           </Link>
         </Button>
       </header>
+
+      {/* Live Supabase rewards store — renders only when auth is configured */}
+      <LiveRewardsStore />
+
+      {isSupabaseConfigured() && (
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-muted-foreground">Prototype store</h2>
+          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Demo data — migrates in a later slice
+          </span>
+        </div>
+      )}
 
       {/* Points banner */}
       <Card className="flex flex-wrap items-center justify-between gap-4 bg-gradient-to-r from-accent/70 to-accent/20 p-4 sm:p-5">
