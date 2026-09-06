@@ -52,6 +52,11 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `products` SELECT | ✗ (until the rewards slice adds a customer catalogue view) | whole business | whole business | whole business | writes RPC-only (`create_product`/`update_product`); archived, never deleted |
 | `inventory_by_store` SELECT | ✗ | **own stores when store-scoped**, else whole business | whole business | whole business | proposal §Store-scoped: the policy inherits the `stores` RLS scoping; writes RPC-only |
 | `inventory_movements` SELECT | ✗ | whole business | whole business | whole business | append-only operational history — no grants + trigger, corrections are compensating movements |
+| `rewards` SELECT | **active rewards** of businesses where they hold an active membership | whole business | whole business | whole business | writes RPC-only (`create_reward`/`update_reward`); archived, never deleted |
+| `reward_inventory` SELECT | ✗ | whole business | whole business | whole business | no rows = unlimited; store row preferred over the `store_id`-null pool row; holds change only inside the redemption RPCs; no DML grants |
+| `redemptions` SELECT | **own redemptions only** | whole business | whole business | whole business | writes RPC-only (`redeem_reward`/`collect_redemption`/`cancel_redemption`); lifecycle status flips — never deleted; collection codes stored **sha256 + last4 only** (§8.4) |
+| `redemption_items` SELECT | follows parent redemption (`EXISTS` into RLS-filtered `redemptions`) | ← same | ← same | ← same | reward name/points snapshot at redeem time |
+| `redemption_counters` | ✗ | ✗ | ✗ | ✗ | internal per-business `RDM-####` sequence, locked inside `redeem_reward`; no grants, no policies |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -91,6 +96,12 @@ in `src/lib/supabase/admin.ts`).
 | `create_sale` v2 | staff+ | Slice-2 semantics **plus**: catalogue lines are re-priced from `products.price_paise` (a differing client price is refused unless manager+ — line flagged `price_overridden`, audited); catalogue lines need whole units; stock is validated and decremented through `inventory_move` under the deterministic lock order *balance → inventory (by product_id) → invoice counter* | `sale.created` (+ `stock_lines`/`price_overrides` in metadata) |
 | `void_sale` v2 | manager+ | Slice-2 semantics **plus**: catalogue lines are restocked with compensating `sale_void` movements (idempotent per sale+product) | `sale.voided` (+ `stock_lines_restored`) |
 | `inventory_move` | — internal — | EXECUTE revoked from API roles (like `ledger_post_entry`); locks the stock row, enforces `on_hand ≥ reserved`, appends the movement with `balance_after`, replay-safe on the per-business key | — |
+| `create_reward` | manager+ | name/type/points/expiry validated; `max_per_customer_per_month` ≥ 1 when set | `reward.created` |
+| `update_reward` | manager+ | partial update; archived never deleted; **archiving refused while pending redemptions exist** | `reward.updated` |
+| `set_reward_inventory` | manager+ | on_hand ≥ 0; cannot drop below the current reserved hold (`inventory_reserved_conflict`) | `reward.inventory_set` |
+| `redeem_reward` | the member themself **or** staff+ | store-scoped staff confined to their stores; rolling-30-day limit; reserves the exact inventory row (store → pool → unlimited) and records `inventory_scope`; points spent through a `redeem` ledger entry (idempotent on `redemption:<id>`); the plaintext code is returned **once** (replays carry `code: null`); lock order *balance → inventory → counter* | `redemption.created` |
+| `collect_redemption` | staff+ | Crockford-normalizes the code (I/L/O → 1/1/0) then sha256-matches; lazy expiry marks + releases + audits and then **returns** `expired` (a raise would roll the marking back); debits exactly the reserved row | `redemption.collected` (+ `redemption.expired`) |
+| `cancel_redemption` | manager+ **or** the member themself | **reason required**; pending only; refunds with a compensating `adjust` entry (idempotent on `redemption-cancel:<id>`); releases the hold from exactly the reserved row; lazy expiry as in collect | `redemption.cancelled` (+ `redemption.expired`) |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
@@ -103,9 +114,9 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **69 cases, 69 passed** (Step 2 suite executed 2026-09-05;
-ledger + sales + inventory suites 2026-09-06, against PostgreSQL 18.4 with the real migrations +
-seed; see `RLS_TEST_RESULTS.md` for all logs):
+`scripts/rls-check/10_assertions.sql` — **78 cases, 78 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales + inventory + rewards/redemptions suites 2026-09-06, against PostgreSQL 18.4 with
+the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
   cross-tenant FK-consistency trigger, uniqueness constraints, one-pending-invite rule, invitation
@@ -147,10 +158,27 @@ seed; see `RLS_TEST_RESULTS.md` for all logs):
   overdraw; append-only enforced twice (no DML grants → 42501, immutability trigger → 22023 even
   for postgres); RLS visibility own-memberships / whole-business / never cross-tenant; insert
   guards reject business-mismatched, foreign-store and blocked-membership entries.
+- **RE1–RE9** rewards/redemptions: manager-only reward create/update/inventory-set (staff,
+  customers and other tenants 42501; negative inventory, archiving with pending redemptions and
+  inventory below the reserved hold refused 22023); customer self-redemption spends the exact
+  points, mints an `RDM-####` reference and a one-time 8-char Crockford code (only sha256 + last4
+  stored), posts the `redeem` ledger entry and reserves the exact inventory row (`inventory_scope`
+  recorded); insufficient balance persists nothing at all; staff may redeem on behalf but
+  store-scoped staff only at their own stores; cross-member, cross-tenant and cross-business
+  redemptions refused; counter collection is staff-only and code-gated (lowercase normalized,
+  wrong code refused, double-collect refused) and debits the reserved row (on_hand −qty, hold
+  cleared); lazy expiry marks + releases + audits and RETURNS `expired`; cancel is manager+/own,
+  reason-required, refunds via the idempotent `adjust` entry and frees the hold; monthly limits
+  count pending/collected only, so a cancellation frees the slot; idempotency replays return the
+  stored redemption with `code: null`; customers see active rewards + their own redemptions while
+  inventory/counters stay staff-internal; no DML grants — even owners write through RPCs only.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 107 assertions) mirrors the same matrix for
-`supabase test db` on the CLI stack. It could not be executed in the build sandbox (no Docker);
-the plain-SQL harness proves identical boundaries on stock PostgreSQL.
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 155 assertions) mirrors the same matrix for
+`supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
+additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
+harness database with stubs for the pgTAP subset it uses (plan/is/ok/lives_ok/throws_ok/finish):
+**155/155 passed** (2026-09-06). That run also surfaced a pre-existing off-by-two `plan()` count
+(the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices
 
@@ -173,10 +201,23 @@ the plain-SQL harness proves identical boundaries on stock PostgreSQL.
   instead of a generic `idempotency_keys` table — same replay guarantee, less machinery.
   `sale_items.points_awarded` stays 0 until per-line rule pricing exists.
 - Inventory slice deviations: `product_categories`/`product_images`/`brand` deferred (free-text
-  category/subcategory + `art_key` cover the launch UI); `reserved` stays 0 until redemptions add
-  holds; movements carry `balance_after` + per-business idempotency keys (points_ledger pattern)
-  and FK-free `created_by`; the customer-facing catalogue view arrives with the rewards slice;
+  category/subcategory + `art_key` cover the launch UI); movements carry `balance_after` +
+  per-business idempotency keys (points_ledger pattern) and FK-free `created_by`;
   catalogue-backed sale lines need whole units (integer movement deltas) — fractional units
-  (wire per metre) stay snapshot-only until a units slice.
+  (wire per metre) stay snapshot-only until a units slice. `inventory_by_store.reserved` stays 0
+  for sales (stock is decremented synchronously); holds live on `reward_inventory.reserved`
+  instead — the rewards slice shipped them.
 - `actor_profile_id` on the ledger is FK-free on purpose (audit_logs precedent): deleting a staff
   auth user must never be blocked by — or silently rewrite — financial history.
+- Rewards slice decisions: the rewards catalogue is **standalone** — `rewards` has no FK to
+  `products`; launch rewards reference catalogue items by name/`art_key` only, so a product can be
+  archived without stranding a reward (and `redemption_items` snapshot the reward, never a live
+  catalogue row). `cash_due_paise` exists but stays 0 until the options slice; tier-gating
+  (`reward_eligibility`) and a `redemption_status_events` table are deferred — every transition is
+  an `audit_logs` row with from/to in metadata. Expiry is **lazy** (marked on the next
+  collect/cancel touch, which RETURNS `expired` instead of raising — a raise would roll the
+  marking back) until a cron exists. Invalid-code attempts are denial-audited by the calling
+  server action for the same reason. `redemptions.inventory_scope` pins the exact
+  `reward_inventory` row reserved at redeem time so collect/cancel never guess candidate rows.
+  Monthly limits are a rolling-30-day window counting pending/collected only. The customer-facing
+  *products* catalogue view is still deferred (customers see rewards, not stock).

@@ -289,7 +289,50 @@ begin
   end loop;
 end $$;
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- Slice 4 seed: rewards catalogue + reward inventory. Mirrors the Phase-1
+-- mock rewards (single points cost at launch — points+cash options arrive
+-- with the reward_options slice). Discount coupons are UNLIMITED (no
+-- inventory rows); physical rewards carry per-store or business-wide pools.
+-- No redemptions are seeded — real redemption history starts empty.
+-- ─────────────────────────────────────────────────────────────────────────
+insert into public.rewards
+  (id, business_id, name, description, reward_type, category, regular_price_paise,
+   art_key, points_cost, expiry_days, max_per_customer_per_month)
+values
+  ('dddddddd-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000001',
+   'Philips 9W LED Bulb', 'Energy-efficient LED bulb for everyday home and shop lighting.',
+   'free_product', 'Lighting', 12000, 'bulb', 750, 7, 2),
+  ('dddddddd-0000-4000-8000-000000000002', 'aaaaaaaa-0000-4000-8000-000000000001',
+   'Philips 12W LED Bulb', 'Brighter 12W cool daylight LED bulb with surge protection.',
+   'free_product', 'Lighting', 16500, 'bulb', 950, 7, null),
+  ('dddddddd-0000-4000-8000-000000000003', 'aaaaaaaa-0000-4000-8000-000000000001',
+   '₹100 Instant Discount', '₹100 off your next purchase at any Ambika Electricals store.',
+   'discount', 'Savings', null, 'coupon', 100, 30, 4),
+  ('dddddddd-0000-4000-8000-000000000004', 'aaaaaaaa-0000-4000-8000-000000000001',
+   'Crompton Ceiling Fan 1200mm', 'High-speed ceiling fan with dust-resistant finish.',
+   'free_product', 'Fans', 245000, 'fan', 2450, 14, 1),
+  ('dddddddd-0000-4000-8000-000000000005', 'aaaaaaaa-0000-4000-8000-000000000001',
+   'Wipro Emergency LED Light', 'Rechargeable emergency light — 4 hours of backup.',
+   'gift', 'Lighting', 89000, 'flood', 890, 14, null),
+  ('dddddddd-0000-4000-8000-000000000006', 'aaaaaaaa-0000-4000-8000-000000000002',
+   'Volt ₹50 Off', '₹50 off at Volt & Co — cross-tenant test reward.',
+   'discount', 'Savings', null, 'coupon', 50, 30, null)
+on conflict (id) do nothing;
+
+-- Reward inventory: store rows + one business-wide pool (fan). The ₹100/₹50
+-- discount coupons intentionally have NO rows = unlimited.
+insert into public.reward_inventory (reward_id, store_id, on_hand)
+values
+  ('dddddddd-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001', 20),
+  ('dddddddd-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000002', 10),
+  ('dddddddd-0000-4000-8000-000000000002', 'bbbbbbbb-0000-4000-8000-000000000001', 15),
+  ('dddddddd-0000-4000-8000-000000000002', 'bbbbbbbb-0000-4000-8000-000000000002', 8),
+  ('dddddddd-0000-4000-8000-000000000004', null, 3),
+  ('dddddddd-0000-4000-8000-000000000005', 'bbbbbbbb-0000-4000-8000-000000000001', 6)
+on conflict (reward_id, coalesce(store_id, '00000000-0000-0000-0000-000000000000'::uuid)) do nothing;
+
 do $$
 begin
-  raise notice 'Dev seed complete: Ambika Electricals (owner dev-ambika-owner@ambika.local), manager, 2 store-scoped staff, customers Rahul/Priya, second tenant Volt & Co, 1 pending invitation (dev token devlocal0000...0000), points ledger history (Rahul 420 pts, Priya 150 pts), product catalogue (6 Ambika + 1 Volt) with per-store opening stock and initial movements. No usable passwords exist — use Supabase Auth email flows locally.';
+  raise notice 'Dev seed complete: Ambika Electricals (owner dev-ambika-owner@ambika.local), manager, 2 store-scoped staff, customers Rahul/Priya, second tenant Volt & Co, 1 pending invitation (dev token devlocal0000...0000), points ledger history (Rahul 420 pts, Priya 150 pts), product catalogue (6 Ambika + 1 Volt) with per-store opening stock and initial movements, rewards catalogue (5 Ambika + 1 Volt) with per-store/pool reward inventory. No usable passwords exist — use Supabase Auth email flows locally.';
 end $$;

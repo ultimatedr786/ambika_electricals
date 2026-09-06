@@ -2243,3 +2243,580 @@ begin
   end;
   execute 'reset role';
 end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- RE cases — rewards catalogue + point redemptions (Slice 4). Cases COMMIT;
+-- each creates its own fixtures (rewards, memberships) and unique
+-- idempotency keys. Balances are asserted as DELTAS (earlier committed cases
+-- may have moved seeded balances). Collection codes are random per run — the
+-- plaintext is captured from the RPC response and only its sha256 + last4
+-- may exist in the database.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- CASE: RE1 rewards — manager-only lifecycle: create with validation, update, archive; inventory rows manager-only
+do $$
+declare
+  v_res jsonb; v_rid uuid; v_n int;
+begin
+  execute 'set local role authenticated';
+
+  -- staff cannot create rewards
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'Staff gift', 'gift', 100);
+    raise exception 'ASSERT: RE1 staff created a reward';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- customer cannot create rewards
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'Customer gift', 'gift', 100);
+    raise exception 'ASSERT: RE1 customer created a reward';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Volt owner cannot create in Ambika's catalogue
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'Volt gift', 'gift', 100);
+    raise exception 'ASSERT: RE1 cross-tenant reward created';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- manager creates; invalid type / cost refused
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'Bad type', 'freebie', 100);
+    raise exception 'ASSERT: RE1 invalid reward_type accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'Free freebie', 'gift', 0);
+    raise exception 'ASSERT: RE1 zero points_cost accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  select public.create_reward('aaaaaaaa-0000-4000-8000-000000000001',
+    'RE1 Test Gift', 'gift', 200, 'Fixture reward', 'Testing', null, 'gift', 7, 1) into v_res;
+  v_rid := (v_res ->> 'reward_id')::uuid;
+
+  -- update: re-price, then archive (nothing pending)
+  select public.update_reward(v_rid, null, null, 250) into v_res;
+  if (v_res ->> 'points_cost')::int <> 250 then raise exception 'ASSERT: RE1 re-price failed: %', v_res; end if;
+  begin
+    perform public.update_reward(v_rid, null, null, null, null, null, null, null, null, 'deleted');
+    raise exception 'ASSERT: RE1 invalid status accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  select public.update_reward(v_rid, null, null, null, null, null, null, null, null, 'archived') into v_res;
+  if (v_res ->> 'status') <> 'archived' then raise exception 'ASSERT: RE1 archive failed'; end if;
+
+  -- archived rewards cannot be redeemed (staff counter flow for a walk-in member)
+  begin
+    perform public.redeem_reward(v_rid, (select cm.id from public.customer_memberships cm
+      where cm.business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and cm.profile_id is null limit 1));
+    raise exception 'ASSERT: RE1 archived reward redeemed';
+  exception when invalid_parameter_value then
+    if position('reward_archived' in SQLERRM) = 0 then raise exception 'ASSERT: RE1 wrong message %', SQLERRM; end if;
+  end;
+
+  -- inventory: staff refused; manager sets a store row; negative refused
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.set_reward_inventory('dddddddd-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001', 9);
+    raise exception 'ASSERT: RE1 staff set reward inventory';
+  exception when insufficient_privilege then null;
+  end;
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.set_reward_inventory('dddddddd-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001', -1);
+    raise exception 'ASSERT: RE1 negative on_hand accepted';
+  exception when invalid_parameter_value then null;
+  end;
+  select public.set_reward_inventory('dddddddd-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001', 20) into v_res;
+  if (v_res ->> 'on_hand_before')::int <> 20 or (v_res ->> 'on_hand_after')::int <> 20 then
+    raise exception 'ASSERT: RE1 inventory set wrong: %', v_res;  -- seeded 20 → unchanged
+  end if;
+  execute 'reset role';
+
+  select count(*) into v_n from public.rewards where id = v_rid and status = 'archived' and points_cost = 250;
+  if v_n <> 1 then raise exception 'ASSERT: RE1 reward row wrong'; end if;
+  select count(*) into v_n from public.audit_logs where action = 'reward.created' and target_id = v_rid::text;
+  if v_n <> 1 then raise exception 'ASSERT: RE1 reward.created audit missing'; end if;
+  select count(*) into v_n from public.audit_logs where action = 'reward.updated' and target_id = v_rid::text;
+  if v_n <> 2 then raise exception 'ASSERT: RE1 expected 2 reward.updated audits, got %', v_n; end if;
+end $$;
+
+-- CASE: RE2 redemptions — customer self-redeem: points spent via ledger, one-time code hashed, reference counter, replay
+do $$
+declare
+  v_mem uuid; v_before int; v_after int; v_res jsonb; v_red uuid;
+  v_code text; v_n int; v_last4 char(4); v_hash bytea; v_stored text;
+begin
+  select id into v_mem from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+  select current_points into v_before from public.customer_points_balance where customer_membership_id = v_mem;
+  if v_before is null then v_before := 0; end if;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+
+  -- ₹100 discount coupon (100 pts, unlimited — no inventory rows)
+  select public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem, null, 1, 're2-key') into v_res;
+  execute 'reset role';
+
+  v_red := (v_res ->> 'redemption_id')::uuid;
+  v_code := v_res ->> 'code';
+  if v_code !~ '^[0-9A-HJKMNP-TV-Z]{8}$' then raise exception 'ASSERT: RE2 code not Crockford-8: %', v_code; end if;
+  if (v_res ->> 'reference') !~ '^RDM-[0-9]{4}$' then raise exception 'ASSERT: RE2 reference format: %', v_res; end if;
+  if (v_res ->> 'points_used')::int <> 100 then raise exception 'ASSERT: RE2 points_used wrong: %', v_res; end if;
+  if (v_res ->> 'balance_after')::int <> v_before - 100 then
+    raise exception 'ASSERT: RE2 balance delta wrong: % vs before %', v_res, v_before;
+  end if;
+
+  select current_points into v_after from public.customer_points_balance where customer_membership_id = v_mem;
+  if v_after <> v_before - 100 then raise exception 'ASSERT: RE2 cache not updated: % → %', v_before, v_after; end if;
+
+  select code_last4, code_hash into v_last4, v_hash from public.redemptions where id = v_red;
+  if v_last4 <> right(v_code, 4) then raise exception 'ASSERT: RE2 code_last4 mismatch'; end if;
+  if v_hash is distinct from extensions.digest(convert_to(v_code, 'UTF8'), 'sha256') then
+    raise exception 'ASSERT: RE2 stored hash is not sha256(code)';
+  end if;
+
+  select count(*) into v_n from public.points_ledger
+   where entry_type = 'redeem' and points = -100 and source_type = 'redemption'
+     and idempotency_key = 'redemption:' || v_red;
+  if v_n <> 1 then raise exception 'ASSERT: RE2 ledger redeem entry missing'; end if;
+  select count(*) into v_n from public.redemption_items where redemption_id = v_red and points_each = 100;
+  if v_n <> 1 then raise exception 'ASSERT: RE2 redemption_items snapshot missing'; end if;
+  select count(*) into v_n from public.audit_logs where action = 'redemption.created' and target_id = v_red::text;
+  if v_n <> 1 then raise exception 'ASSERT: RE2 redemption.created audit missing'; end if;
+
+  -- replay: same key → same redemption, NO code the second time, one ledger entry
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem, null, 1, 're2-key') into v_res;
+  execute 'reset role';
+  if not (v_res ->> 'replayed')::boolean then raise exception 'ASSERT: RE2 replay not flagged'; end if;
+  if (v_res ->> 'redemption_id')::uuid <> v_red then raise exception 'ASSERT: RE2 replay created a second redemption'; end if;
+  if v_res ->> 'code' is not null then raise exception 'ASSERT: RE2 replay leaked the code again'; end if;
+  select count(*) into v_n from public.points_ledger where idempotency_key = 'redemption:' || v_red;
+  if v_n <> 1 then raise exception 'ASSERT: RE2 duplicate ledger entries on replay'; end if;
+end $$;
+
+-- CASE: RE3 redemptions — insufficient points refused with nothing persisted; staff counter redemption works
+do $$
+declare
+  v_rahul uuid; v_priya uuid; v_before int; v_res jsonb; v_n int;
+begin
+  select id into v_rahul from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+  select id into v_priya from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVPRIYA1';
+  select coalesce(current_points, 0) into v_before from public.customer_points_balance
+   where customer_membership_id = v_rahul;
+
+  execute 'set local role authenticated';
+
+  -- Rahul cannot afford the 2450-pt ceiling fan
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000004', v_rahul, null, 1, 're3-poor');
+    raise exception 'ASSERT: RE3 over-balance redemption accepted';
+  exception when invalid_parameter_value then
+    if position('insufficient_points' in SQLERRM) = 0 then raise exception 'ASSERT: RE3 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+  select count(*) into v_n from public.redemptions where idempotency_key = 're3-poor';
+  if v_n <> 0 then raise exception 'ASSERT: RE3 refused redemption persisted'; end if;
+  select current_points into v_n from public.customer_points_balance where customer_membership_id = v_rahul;
+  if v_n <> v_before then raise exception 'ASSERT: RE3 balance moved on refusal'; end if;
+
+  -- staff redeems the ₹100 coupon for Priya at the counter
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_priya,
+    'bbbbbbbb-0000-4000-8000-000000000001', 1, 're3-counter') into v_res;
+  execute 'reset role';
+  if (v_res ->> 'points_used')::int <> 100 then raise exception 'ASSERT: RE3 counter redemption wrong: %', v_res; end if;
+  select count(*) into v_n from public.audit_logs
+   where action = 'redemption.created' and target_id = (v_res ->> 'redemption_id');
+  if v_n <> 1 then raise exception 'ASSERT: RE3 counter redemption audit missing'; end if;
+end $$;
+
+-- CASE: RE4 reward inventory — reservations, last-unit races, pool fallback, unlimited rewards
+do $$
+declare
+  v_rid uuid; v_mem_a uuid; v_mem_b uuid; v_res jsonb; v_n int; v_red_a uuid;
+begin
+  -- fixture reward with exactly 1 unit at the Main Store
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'RE4 Last Unit', 'gift', 50, null, null, null, null, 7, null) into v_res;
+  v_rid := (v_res ->> 'reward_id')::uuid;
+  perform public.set_reward_inventory(v_rid, 'bbbbbbbb-0000-4000-8000-000000000001', 1);
+  execute 'reset role';
+
+  -- two fixture members, 50 points each
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE4 Member A', 'active') returning id into v_mem_a;
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE4 Member B', 'active') returning id into v_mem_b;
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem_a, 50, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're4-fund-a', 'RE4 fixture funding');
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem_b, 50, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're4-fund-b', 'RE4 fixture funding');
+
+  -- A claims the last unit; B is refused
+  select public.redeem_reward(v_rid, v_mem_a, 'bbbbbbbb-0000-4000-8000-000000000001', 1, 're4-a') into v_res;
+  v_red_a := (v_res ->> 'redemption_id')::uuid;
+  begin
+    perform public.redeem_reward(v_rid, v_mem_b, 'bbbbbbbb-0000-4000-8000-000000000001', 1, 're4-b');
+    raise exception 'ASSERT: RE4 second claim on the last unit accepted';
+  exception when invalid_parameter_value then
+    if position('insufficient_inventory' in SQLERRM) = 0 then raise exception 'ASSERT: RE4 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+
+  select reserved into v_n from public.reward_inventory
+   where reward_id = v_rid and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_n <> 1 then raise exception 'ASSERT: RE4 reservation missing: %', v_n; end if;
+
+  -- cancelling A releases the hold → B succeeds
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.cancel_redemption(v_red_a, 'RE4 test release');
+  select public.redeem_reward(v_rid, v_mem_b, 'bbbbbbbb-0000-4000-8000-000000000001', 1, 're4-b2') into v_res;
+  execute 'reset role';
+  select reserved into v_n from public.reward_inventory
+   where reward_id = v_rid and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_n <> 1 then raise exception 'ASSERT: RE4 reservation not re-held by B: %', v_n; end if;
+
+  -- pool fallback: the ceiling fan has ONLY a business-wide pool row (3)
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem_a, 2450, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're4-fund-fan', 'RE4 fan funding');
+  select public.redeem_reward('dddddddd-0000-4000-8000-000000000004', v_mem_a,
+    'bbbbbbbb-0000-4000-8000-000000000001', 1, 're4-pool') into v_res;
+  execute 'reset role';
+  select count(*) into v_n from public.redemptions
+   where id = (v_res ->> 'redemption_id')::uuid and inventory_scope = 'pool';
+  if v_n <> 1 then raise exception 'ASSERT: RE4 pool fallback not recorded'; end if;
+  select reserved into v_n from public.reward_inventory
+   where reward_id = 'dddddddd-0000-4000-8000-000000000004' and store_id is null;
+  if v_n <> 1 then raise exception 'ASSERT: RE4 pool reservation wrong: %', v_n; end if;
+end $$;
+
+-- CASE: RE5 redemption authorization — other customers, scoped staff and cross-tenant are refused
+do $$
+declare
+  v_rahul uuid; v_priya uuid;
+begin
+  select id into v_rahul from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+  select id into v_priya from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVPRIYA1';
+
+  execute 'set local role authenticated';
+
+  -- Priya's user cannot redeem Rahul's membership
+  perform set_config('request.jwt.claims', '{"sub":"66666666-6666-4666-8666-666666666666","role":"authenticated"}', true);
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_rahul, null, 1, 're5-priya-for-rahul');
+    raise exception 'ASSERT: RE5 customer redeemed another member''s points';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- store-scoped staff cannot redeem at a store they aren't assigned to
+  perform set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_priya,
+      'bbbbbbbb-0000-4000-8000-000000000001', 1, 're5-scoped-main');
+    raise exception 'ASSERT: RE5 scoped staff redeemed at a foreign store';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- ...but CAN at their own store (fund Priya first — RE3 spent her balance)
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_priya, 100, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000002', 're5-fund-priya', 'RE5 fixture funding');
+  perform set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+  perform public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_priya,
+      'bbbbbbbb-0000-4000-8000-000000000002', 1, 're5-scoped-sat');
+
+  -- Volt owner cannot redeem Ambika rewards
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_priya, null, 1, 're5-volt');
+    raise exception 'ASSERT: RE5 cross-tenant redemption accepted';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Rahul cannot redeem into Volt's catalogue (membership not in that business)
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000006', v_rahul, null, 1, 're5-rahul-volt');
+    raise exception 'ASSERT: RE5 membership crossed tenants';
+  exception when invalid_parameter_value then
+    if position('customer_not_found' in SQLERRM) = 0 then raise exception 'ASSERT: RE5 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: RE6 collect — hashed code verified (lowercase tolerated), stock debited, transitions final, staff-only
+do $$
+declare
+  v_rid uuid; v_mem uuid; v_res jsonb; v_red uuid; v_code text; v_n int; v_on int; v_resv int;
+begin
+  -- fixture reward, 2 units at Main
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'RE6 Pickup Gift', 'gift', 30, null, null, null, null, 7, null) into v_res;
+  v_rid := (v_res ->> 'reward_id')::uuid;
+  perform public.set_reward_inventory(v_rid, 'bbbbbbbb-0000-4000-8000-000000000001', 2);
+  execute 'reset role';
+
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE6 Member', 'active') returning id into v_mem;
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 30, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're6-fund', 'RE6 fixture funding');
+  select public.redeem_reward(v_rid, v_mem, 'bbbbbbbb-0000-4000-8000-000000000001', 1, 're6-redeem') into v_res;
+  v_red := (v_res ->> 'redemption_id')::uuid;
+  v_code := v_res ->> 'code';
+
+  -- customer cannot collect their own redemption at the counter
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.collect_redemption(v_red, v_code);
+    raise exception 'ASSERT: RE6 customer collected a redemption';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- staff: wrong code refused + audited
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.collect_redemption(v_red, 'ZZZZZZZZ');
+    raise exception 'ASSERT: RE6 wrong code accepted';
+  exception when invalid_parameter_value then
+    if position('redemption_code_invalid' in SQLERRM) = 0 then raise exception 'ASSERT: RE6 wrong message %', SQLERRM; end if;
+  end;
+
+  -- staff: lowercase code tolerated → collected
+  select public.collect_redemption(v_red, lower(v_code)) into v_res;
+  if (v_res ->> 'status') <> 'collected' then raise exception 'ASSERT: RE6 not collected: %', v_res; end if;
+
+  -- second collect refused
+  begin
+    perform public.collect_redemption(v_red, v_code);
+    raise exception 'ASSERT: RE6 double collect accepted';
+  exception when invalid_parameter_value then
+    if position('redemption_not_collectable' in SQLERRM) = 0 then raise exception 'ASSERT: RE6 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+
+  select on_hand, reserved into v_on, v_resv from public.reward_inventory
+   where reward_id = v_rid and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_on <> 1 or v_resv <> 0 then raise exception 'ASSERT: RE6 stock debit wrong: on_hand=%, reserved=%', v_on, v_resv; end if;
+  select count(*) into v_n from public.audit_logs where action = 'redemption.collected' and target_id = v_red::text;
+  if v_n <> 1 then raise exception 'ASSERT: RE6 collection not audited'; end if;
+  select count(*) into v_n from public.redemptions
+   where id = v_red and status = 'collected' and collected_at is not null and collected_by is not null;
+  if v_n <> 1 then raise exception 'ASSERT: RE6 collected fields inconsistent'; end if;
+
+  -- lazy expiry: a second pending redemption, backdated, is marked expired on
+  -- the next collect touch — which RETURNS status 'expired' (no raise, so the
+  -- marking + release + audit persist) instead of handing over the reward.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 30, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're6-fund-2', 'RE6 fixture funding');
+  select public.redeem_reward(v_rid, v_mem, 'bbbbbbbb-0000-4000-8000-000000000001', 1, 're6-redeem-2') into v_res;
+  execute 'reset role';
+  update public.redemptions set expires_at = now() - interval '1 hour'
+   where id = (v_res ->> 'redemption_id')::uuid;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.collect_redemption((v_res ->> 'redemption_id')::uuid, v_res ->> 'code') into v_res;
+  execute 'reset role';
+  if (v_res ->> 'status') <> 'expired' or not (v_res ->> 'expired_now')::boolean then
+    raise exception 'ASSERT: RE6 lazy expiry did not report expired: %', v_res;
+  end if;
+  select count(*) into v_n from public.redemptions
+   where id = (v_res ->> 'redemption_id')::uuid and status = 'expired';
+  if v_n <> 1 then raise exception 'ASSERT: RE6 expiry not persisted'; end if;
+  select count(*) into v_n from public.audit_logs
+   where action = 'redemption.expired' and target_id = (v_res ->> 'redemption_id');
+  if v_n <> 1 then raise exception 'ASSERT: RE6 expiry not audited'; end if;
+  select on_hand, reserved into v_on, v_resv from public.reward_inventory
+   where reward_id = v_rid and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  if v_on <> 1 or v_resv <> 0 then
+    raise exception 'ASSERT: RE6 expired hold not released: on_hand=%, reserved=%', v_on, v_resv;
+  end if;
+end $$;
+
+-- CASE: RE7 cancel — manager+ or the member themself, reason required, points refunded via compensating entry
+do $$
+declare
+  v_mem uuid; v_res jsonb; v_red uuid; v_before int; v_after int; v_n int;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE7 Member', 'active') returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 100, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're7-fund', 'RE7 fixture funding');
+  select public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem, null, 1, 're7-redeem') into v_res;
+  v_red := (v_res ->> 'redemption_id')::uuid;
+
+  -- plain staff cannot cancel
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.cancel_redemption(v_red, 'staff attempt');
+    raise exception 'ASSERT: RE7 staff cancelled a redemption';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- manager needs a reason
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.cancel_redemption(v_red, '  ');
+    raise exception 'ASSERT: RE7 blank reason accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  select coalesce(current_points, 0) into v_before from public.customer_points_balance where customer_membership_id = v_mem;
+  select public.cancel_redemption(v_red, 'Changed mind at counter') into v_res;
+  if (v_res ->> 'points_refunded')::int <> 100 then raise exception 'ASSERT: RE7 refund wrong: %', v_res; end if;
+  if (v_res ->> 'balance_after')::int <> v_before + 100 then raise exception 'ASSERT: RE7 balance not restored: %', v_res; end if;
+  execute 'reset role';
+
+  select count(*) into v_n from public.points_ledger
+   where entry_type = 'adjust' and points = 100 and idempotency_key = 'redemption-cancel:' || v_red;
+  if v_n <> 1 then raise exception 'ASSERT: RE7 compensating ledger entry missing'; end if;
+  select count(*) into v_n from public.redemptions
+   where id = v_red and status = 'cancelled' and cancelled_at is not null and cancel_reason is not null;
+  if v_n <> 1 then raise exception 'ASSERT: RE7 cancelled fields inconsistent'; end if;
+
+  -- double cancel refused
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    perform public.cancel_redemption(v_red, 'again');
+    raise exception 'ASSERT: RE7 double cancel accepted';
+  exception when invalid_parameter_value then
+    if position('redemption_not_cancellable' in SQLERRM) = 0 then raise exception 'ASSERT: RE7 wrong message %', SQLERRM; end if;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: RE8 monthly limits — pending/collected count, cancelled do not
+do $$
+declare
+  v_rid uuid; v_mem uuid; v_res jsonb; v_red uuid;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.create_reward('aaaaaaaa-0000-4000-8000-000000000001', 'RE8 Once A Month', 'coupon', 10, null, null, null, null, 30, 1) into v_res;
+  v_rid := (v_res ->> 'reward_id')::uuid;
+  execute 'reset role';
+
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE8 Member', 'active') returning id into v_mem;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 30, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're8-fund', 'RE8 fixture funding');
+
+  select public.redeem_reward(v_rid, v_mem, null, 1, 're8-first') into v_res;
+  begin
+    perform public.redeem_reward(v_rid, v_mem, null, 1, 're8-second');
+    raise exception 'ASSERT: RE8 monthly limit not enforced';
+  exception when invalid_parameter_value then
+    if position('redemption_limit_exceeded' in SQLERRM) = 0 then raise exception 'ASSERT: RE8 wrong message %', SQLERRM; end if;
+  end;
+
+  -- cancelling frees the monthly slot
+  v_red := (v_res ->> 'redemption_id')::uuid;
+  perform public.cancel_redemption(v_red, 'RE8 slot release');
+  select public.redeem_reward(v_rid, v_mem, null, 1, 're8-third') into v_res;
+  execute 'reset role';
+end $$;
+
+-- CASE: RE9 RLS visibility + no DML grants on the redemption tables
+do $$
+declare
+  v_rahul uuid; v_n int;
+begin
+  select id into v_rahul from public.customer_memberships
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' and membership_no = 'AE-DEVRAHUL1';
+
+  execute 'set local role authenticated';
+
+  -- Rahul: own redemptions only, active rewards of his business only
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_n from public.redemptions where customer_membership_id = v_rahul;
+  if v_n < 1 then raise exception 'ASSERT: RE9 Rahul cannot see his own redemptions'; end if;
+  select count(*) into v_n from public.redemptions rd
+    join public.customer_memberships cm on cm.id = rd.customer_membership_id
+   where cm.profile_id is distinct from '55555555-5555-4555-8555-555555555555';
+  if v_n <> 0 then raise exception 'ASSERT: RE9 Rahul sees % other members'' redemptions', v_n; end if;
+  select count(*) into v_n from public.rewards
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+     and id in ('dddddddd-0000-4000-8000-000000000001', 'dddddddd-0000-4000-8000-000000000002',
+                'dddddddd-0000-4000-8000-000000000003', 'dddddddd-0000-4000-8000-000000000004',
+                'dddddddd-0000-4000-8000-000000000005');
+  if v_n <> 5 then raise exception 'ASSERT: RE9 Rahul sees % of the 5 seeded active rewards', v_n; end if;
+  select count(*) into v_n from public.rewards where name = 'RE1 Test Gift';
+  if v_n <> 0 then raise exception 'ASSERT: RE9 archived fixture reward visible to a customer'; end if;
+  select count(*) into v_n from public.rewards where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_n <> 0 then raise exception 'ASSERT: RE9 Rahul sees Volt rewards'; end if;
+  select count(*) into v_n from public.reward_inventory;
+  if v_n <> 0 then raise exception 'ASSERT: RE9 customers can see reward inventory'; end if;
+
+  -- staff-main: business-wide redemptions + inventory, no Volt
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_n from public.redemptions where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n < 3 then raise exception 'ASSERT: RE9 staff sees % business redemptions, expected ≥3', v_n; end if;
+  select count(*) into v_n from public.redemptions where business_id = 'aaaaaaaa-0000-4000-8000-000000000002';
+  if v_n <> 0 then raise exception 'ASSERT: RE9 staff sees Volt redemptions'; end if;
+
+  -- Volt owner: zero Ambika rows
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_n from public.rewards where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: RE9 Volt owner sees Ambika rewards'; end if;
+
+  -- owner: no DML grants anywhere
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    insert into public.rewards (business_id, name, reward_type, points_cost)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'Direct', 'gift', 10);
+    raise exception 'ASSERT: RE9 owner inserted a reward directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update public.redemptions set points_used = 0;
+    raise exception 'ASSERT: RE9 owner updated redemptions directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.reward_inventory (reward_id, on_hand)
+    values ('dddddddd-0000-4000-8000-000000000003', 5);
+    raise exception 'ASSERT: RE9 owner inserted reward inventory directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform count(*) from public.redemption_counters;
+    raise exception 'ASSERT: RE9 redemption counters readable by API roles';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;

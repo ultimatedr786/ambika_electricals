@@ -1,7 +1,10 @@
 -- ============================================================================
 -- pgTAP RLS policy tests — canonical runner: `supabase test db` (local CLI).
 -- Mirrors scripts/rls-check/10_assertions.sql (plain-SQL harness used in CI
--- and anywhere PostgreSQL is available without Docker/Supabase CLI).
+-- and anywhere PostgreSQL is available without Docker/Supabase CLI). Where
+-- Docker is unavailable, `node scripts/rls-check/pgtap-run.mjs` executes this
+-- same file against the harness database with stubs for the pgTAP subset used
+-- here (plan/is/ok/lives_ok/throws_ok/finish).
 --
 -- Design note: every pgTAP assertion runs as the postgres role. Identity
 -- switching happens inside helper functions (SET LOCAL role + JWT claims),
@@ -71,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(107);
+select plan(155);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -863,6 +866,409 @@ select is(
       where business_id = ''aaaaaaaa-0000-4000-8000-000000000001''')::int,
   0,
   'INV7: other tenants never see the catalogue'
+);
+
+-- ---------------------------------------------------------------------------
+-- RE series — rewards catalogue, inventory holds, redemption lifecycle,
+-- collection codes (§8.4), monthly limits and customer visibility
+-- ---------------------------------------------------------------------------
+
+-- Fixtures: an archive-target gift + an inventory-bound coupon + a
+-- monthly-limited gift, all created through the manager-facing RPC.
+select set_config('app.re_rahul',
+  (select id::text from public.customer_memberships where membership_no = 'AE-DEVRAHUL1'), true);
+select set_config('app.re_priya',
+  (select id::text from public.customer_memberships where membership_no = 'AE-DEVPRIYA1'), true);
+
+select set_config('app.re_fid',
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.create_reward(''aaaaaaaa-0000-4000-8000-000000000001'',
+       ''PGTAP Test Gift'', ''gift'', 30, ''Archive fixture'', null, null, null,
+       30, null, ''[]''::jsonb)::text')::jsonb ->> 'reward_id', true);
+select set_config('app.re_fid2',
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.create_reward(''aaaaaaaa-0000-4000-8000-000000000001'',
+       ''PGTAP Stock Coupon'', ''coupon'', 30, ''Inventory fixture'', null, null,
+       null, 30, null, ''[]''::jsonb)::text')::jsonb ->> 'reward_id', true);
+select set_config('app.re_fid3',
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.create_reward(''aaaaaaaa-0000-4000-8000-000000000001'',
+       ''PGTAP Monthly Gift'', ''gift'', 30, ''Limit fixture'', null, null, null,
+       30, 1, ''[]''::jsonb)::text')::jsonb ->> 'reward_id', true);
+
+select is(
+  (select name from public.rewards where id = current_setting('app.re_fid', true)::uuid),
+  'PGTAP Test Gift',
+  'RE1: manager creates a reward through the RPC'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_reward(''aaaaaaaa-0000-4000-8000-000000000001'',
+       ''Nope'', ''gift'', 30)'),
+  '42501',
+  'RE1: staff cannot create rewards'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select public.create_reward(''aaaaaaaa-0000-4000-8000-000000000001'',
+       ''Nope'', ''gift'', 30)'),
+  '42501',
+  'RE1: other tenants cannot create rewards here'
+);
+select is(
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.update_reward(''%s''::uuid, p_status := ''archived'')::text',
+      current_setting('app.re_fid', true)))::jsonb ->> 'status',
+  'archived',
+  'RE1: manager archives a reward (never deleted)'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.redeem_reward(''%s''::uuid,
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''), null, 1, ''pgtap-re-archived'')',
+      current_setting('app.re_fid', true))),
+  '22023',
+  'RE1: archived rewards are not redeemable'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.set_reward_inventory(''%s''::uuid,
+       ''bbbbbbbb-0000-4000-8000-000000000001'', -5)',
+      current_setting('app.re_fid2', true))),
+  '22023',
+  'RE1: negative inventory refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.set_reward_inventory(''%s''::uuid,
+       ''bbbbbbbb-0000-4000-8000-000000000001'', 5)',
+      current_setting('app.re_fid2', true))),
+  '42501',
+  'RE1: staff cannot set reward inventory'
+);
+
+-- RE2: a customer redeems the seeded unlimited ₹100 coupon end to end.
+select is(
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select public.set_reward_inventory(''%s''::uuid,
+       ''bbbbbbbb-0000-4000-8000-000000000001'', 2)::text',
+      current_setting('app.re_fid2', true)))::jsonb ->> 'on_hand_after',
+  '2',
+  'RE2: manager sets Main Store stock for the fixture coupon'
+);
+select extensions.perform_as('authenticated', '22222222-2222-4222-8222-222222222222',
+  format('select public.set_reward_inventory(''%s''::uuid,
+     ''bbbbbbbb-0000-4000-8000-000000000002'', 0)',
+    current_setting('app.re_fid2', true)));
+select set_config('app.re_bal_r2',
+  coalesce((select current_points from public.customer_points_balance
+             where customer_membership_id = (select id from public.customer_memberships
+                                              where membership_no = 'AE-DEVRAHUL1')), 0)::text, true);
+select set_config('app.re_res1',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.redeem_reward(''dddddddd-0000-4000-8000-000000000003'',
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''), null, 1, ''pgtap-re-redeem-1'')::text'), true);
+select is(
+  current_setting('app.re_res1', true)::jsonb ->> 'status', 'pending',
+  'RE2: customer redeems — pending with a one-time code'
+);
+select ok(
+  current_setting('app.re_res1', true)::jsonb ->> 'code' ~ '^[0-9A-HJKMNP-TV-Z]{8}$',
+  'RE2: collection code is 8 Crockford base-32 characters'
+);
+select ok(
+  current_setting('app.re_res1', true)::jsonb ->> 'reference' ~ '^RDM-[0-9]{4}$',
+  'RE2: reference is RDM-####'
+);
+select is(
+  (select current_points from public.customer_points_balance
+    where customer_membership_id = (select id from public.customer_memberships
+                                     where membership_no = 'AE-DEVRAHUL1'))
+    - current_setting('app.re_bal_r2', true)::int,
+  -100,
+  'RE2: exactly 100 points spent'
+);
+select is(
+  (select count(*) from public.points_ledger
+    where idempotency_key = 'redemption:' || (current_setting('app.re_res1', true)::jsonb ->> 'redemption_id'))::int,
+  1,
+  'RE2: one redeem ledger entry, idempotency-keyed'
+);
+select is(
+  (select count(*) from public.audit_logs where action = 'redemption.created')::int,
+  1,
+  'RE2: redemption creation audited'
+);
+
+-- RE3: insufficient balance persists nothing.
+select is(
+  extensions.sqlstate_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    'select public.redeem_reward(''dddddddd-0000-4000-8000-000000000005'',
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVPRIYA1''), null, 1, ''pgtap-re-poor'')'),
+  '22023',
+  'RE3: insufficient points refused (Priya holds 150 < 890)'
+);
+select is(
+  (select count(*) from public.redemptions)::int, 1,
+  'RE3: failed redeem persisted nothing'
+);
+
+-- RE5: cross-member / cross-store / cross-tenant denials.
+select is(
+  extensions.sqlstate_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    format('select public.redeem_reward(''dddddddd-0000-4000-8000-000000000003'',
+       ''%s''::uuid, null, 1, ''pgtap-re-other'')',
+      current_setting('app.re_rahul', true))),
+  '42501',
+  'RE5: customer cannot redeem for another member'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.redeem_reward(''%s''::uuid,
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''),
+       ''bbbbbbbb-0000-4000-8000-000000000002'', 1, ''pgtap-re-sat'')',
+      current_setting('app.re_fid2', true))),
+  '22023',
+  'RE5: satellite store has zero stock — refused'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    format('select public.redeem_reward(''%s''::uuid, ''%s''::uuid,
+       ''bbbbbbbb-0000-4000-8000-000000000001'', 1, ''pgtap-re-volt'')',
+      current_setting('app.re_fid2', true),
+      current_setting('app.re_rahul', true))),
+  '42501',
+  'RE5: other tenants cannot redeem Ambika rewards'
+);
+
+-- RE2b: staff redeem on behalf of a member; the hold lands on the exact row.
+select set_config('app.re_res2',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.redeem_reward(''%s''::uuid,
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''),
+       ''bbbbbbbb-0000-4000-8000-000000000001'', 1, ''pgtap-re-staff-1'')::text',
+      current_setting('app.re_fid2', true))), true);
+select is(
+  current_setting('app.re_res2', true)::jsonb ->> 'status', 'pending',
+  'RE2: staff redeems on behalf of a member'
+);
+select is(
+  (select reserved from public.reward_inventory
+    where reward_id = current_setting('app.re_fid2', true)::uuid
+      and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'),
+  1,
+  'RE2: reservation recorded on the Main Store row'
+);
+
+-- RE6: counter collection — staff-only, code-gated, stock-debiting.
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.collect_redemption(''%s''::uuid, ''AAAAAAAA'')',
+      current_setting('app.re_res2', true)::jsonb ->> 'redemption_id')),
+  '42501',
+  'RE6: customers cannot collect'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.collect_redemption(''%s''::uuid, ''ZZZZZZZZ'')',
+      current_setting('app.re_res2', true)::jsonb ->> 'redemption_id')),
+  '22023',
+  'RE6: wrong code refused'
+);
+select set_config('app.re_col',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.collect_redemption(''%s''::uuid, %L)::text',
+      current_setting('app.re_res2', true)::jsonb ->> 'redemption_id',
+      lower(current_setting('app.re_res2', true)::jsonb ->> 'code'))), true);
+select is(
+  current_setting('app.re_col', true)::jsonb ->> 'status', 'collected',
+  'RE6: lowercase code normalized and accepted'
+);
+select is(
+  (select on_hand from public.reward_inventory
+    where reward_id = current_setting('app.re_fid2', true)::uuid
+      and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'),
+  1,
+  'RE6: stock debited on collection (2 → 1)'
+);
+select is(
+  (select reserved from public.reward_inventory
+    where reward_id = current_setting('app.re_fid2', true)::uuid
+      and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'),
+  0,
+  'RE6: reservation cleared on collection'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.collect_redemption(''%s''::uuid, %L)',
+      current_setting('app.re_res2', true)::jsonb ->> 'redemption_id',
+      current_setting('app.re_res2', true)::jsonb ->> 'code')),
+  '22023',
+  'RE6: double collect refused'
+);
+select is(
+  (select count(*) from public.audit_logs where action = 'redemption.collected')::int,
+  1,
+  'RE6: collection audited once'
+);
+
+-- RE6b: lazy expiry — marking, releasing and auditing survive because the
+-- RPC RETURNS the expired status instead of raising.
+select set_config('app.re_res3',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.redeem_reward(''%s''::uuid,
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''),
+       ''bbbbbbbb-0000-4000-8000-000000000001'', 1, ''pgtap-re-expiry'')::text',
+      current_setting('app.re_fid2', true))), true);
+update public.redemptions
+   set expires_at = now() - interval '1 hour'
+ where id = (current_setting('app.re_res3', true)::jsonb ->> 'redemption_id')::uuid;
+select set_config('app.re_exp',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.collect_redemption(''%s''::uuid, %L)::text',
+      current_setting('app.re_res3', true)::jsonb ->> 'redemption_id',
+      current_setting('app.re_res3', true)::jsonb ->> 'code')), true);
+select is(
+  current_setting('app.re_exp', true)::jsonb ->> 'status', 'expired',
+  'RE6b: lazy expiry returns expired instead of raising'
+);
+select is(
+  (select status::text from public.redemptions
+    where id = (current_setting('app.re_res3', true)::jsonb ->> 'redemption_id')::uuid),
+  'expired',
+  'RE6b: expiry persisted on the row'
+);
+select is(
+  (select reserved from public.reward_inventory
+    where reward_id = current_setting('app.re_fid2', true)::uuid
+      and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'),
+  0,
+  'RE6b: expired hold released'
+);
+select is(
+  (select count(*) from public.audit_logs where action = 'redemption.expired')::int,
+  1,
+  'RE6b: expiry audited'
+);
+
+-- RE7 + RE8: cancellation refunds through the ledger; limits count only
+-- pending/collected, so a cancelled redemption frees the monthly slot.
+select set_config('app.re_res4',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.redeem_reward(''%s''::uuid,
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''), null, 1, ''pgtap-re-limit-1'')::text',
+      current_setting('app.re_fid3', true))), true);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.redeem_reward(''%s''::uuid,
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''), null, 1, ''pgtap-re-limit-2'')',
+      current_setting('app.re_fid3', true))),
+  '22023',
+  'RE8: monthly limit enforced while one is pending'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    format('select public.cancel_redemption(''%s''::uuid, ''staff should not cancel'')',
+      current_setting('app.re_res4', true)::jsonb ->> 'redemption_id')),
+  '42501',
+  'RE7: staff cannot cancel redemptions'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.cancel_redemption(''%s''::uuid, ''   '')',
+      current_setting('app.re_res4', true)::jsonb ->> 'redemption_id')),
+  '22023',
+  'RE7: cancellation requires a reason'
+);
+select set_config('app.re_bal_r7',
+  (select current_points from public.customer_points_balance
+    where customer_membership_id = (select id from public.customer_memberships
+                                     where membership_no = 'AE-DEVRAHUL1'))::text, true);
+select set_config('app.re_can',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.cancel_redemption(''%s''::uuid, ''Changed my mind'')::text',
+      current_setting('app.re_res4', true)::jsonb ->> 'redemption_id')), true);
+select is(
+  current_setting('app.re_can', true)::jsonb ->> 'points_refunded', '30',
+  'RE7: customer cancels own pending redemption'
+);
+select is(
+  (select current_points from public.customer_points_balance
+    where customer_membership_id = (select id from public.customer_memberships
+                                     where membership_no = 'AE-DEVRAHUL1'))
+    - current_setting('app.re_bal_r7', true)::int,
+  30,
+  'RE7: points refunded to the balance'
+);
+select is(
+  (select count(*) from public.points_ledger
+    where idempotency_key like 'redemption-cancel:%')::int,
+  1,
+  'RE7: refund is one idempotency-keyed adjust entry'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.cancel_redemption(''%s''::uuid, ''again'')',
+      current_setting('app.re_res4', true)::jsonb ->> 'redemption_id')),
+  '22023',
+  'RE7: already-cancelled refused'
+);
+select is(
+  (select count(*) from public.audit_logs where action = 'redemption.cancelled')::int,
+  1,
+  'RE7: cancellation audited'
+);
+select set_config('app.re_res5',
+  extensions.text_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    format('select public.redeem_reward(''%s''::uuid,
+       (select id from public.customer_memberships
+         where membership_no = ''AE-DEVRAHUL1''), null, 1, ''pgtap-re-limit-3'')::text',
+      current_setting('app.re_fid3', true))), true);
+select is(
+  current_setting('app.re_res5', true)::jsonb ->> 'status', 'pending',
+  'RE8: cancellation frees the monthly slot'
+);
+
+-- RE9: visibility + RPC-only writes.
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.rewards
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001''')::int,
+  7,
+  'RE9: customer sees 5 seeded + 2 active fixture rewards (archived hidden)'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.redemptions')::int,
+  5,
+  'RE9: customer sees only their own 5 redemptions'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.reward_inventory')::int,
+  0,
+  'RE9: reward inventory is staff-only'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.redemption_counters'),
+  '42501',
+  'RE9: reference counters unreadable by customers'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'insert into public.redemptions (business_id)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'')'),
+  '42501',
+  'RE9: no direct DML on redemptions (RPC-only)'
 );
 
 select * from finish();

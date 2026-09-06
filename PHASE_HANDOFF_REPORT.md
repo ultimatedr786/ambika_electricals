@@ -73,7 +73,56 @@ re-prices; manual snapshot lines remain for non-catalogue items).
 
 Next: redemptions + rewards catalogue (`rewards`, `reward_inventory` holds,
 `redeem_reward` spending points through the ledger, collection codes), then
-GST/tax, then the rule engine replacing the launch-policy columns.
+production QR (signed membership codes) per §4, and the rule engine replacing
+the launch-policy columns. (Correction 2026-09-06: this line originally said
+"then GST/tax" — proposal decision D12 keeps GST invoicing in the existing
+billing software unless separately scoped; it is not a §4 slice.)
+
+## ADDENDUM 4 (2026-09-06) — Slice 4 delivered: rewards + redemptions
+
+Item 4 of §4 is **implemented and proven**:
+`supabase/migrations/20260906150000_rewards_redemptions.sql` adds `rewards`
+(manager-curated catalogue, archived never deleted), `reward_inventory`
+(store rows preferred over the business-wide pool; no rows = unlimited;
+`on_hand ≥ reserved`), `redemptions` + `redemption_items` snapshots and the
+internal `redemption_counters` sequence behind `RDM-####` references, and
+the RPCs `create_reward` / `update_reward` / `set_reward_inventory`
+(manager+), `redeem_reward` (self or staff+; store-scoped staff confined to
+their stores; rolling-30-day limit; spends points through an idempotent
+`redeem` ledger entry; reserves the exact inventory row — pinned on the
+redemption as `inventory_scope`), `collect_redemption` (staff+; §8.4 codes —
+8 Crockford base-32 chars from 40 random bits, only sha256 + last4 stored,
+I/L/O normalized to 1/1/0, plaintext returned exactly once) and
+`cancel_redemption` (manager+ or the member themself; reason required;
+refund through an idempotent compensating `adjust` entry). Expiry is lazy:
+the next collect/cancel touch marks the redemption expired, releases the
+hold, audits — and RETURNS `expired` instead of raising (a raise would roll
+the marking back); invalid-code denial audits live in the server actions for
+the same reason. Seed carries the launch reward catalogue (5 Ambika +
+1 Volt reward with per-store/pool inventory).
+
+UI landed with the slice: the business Rewards page gains a live panel
+(create/edit/archive, per-store + pool stock, counter redemption with the
+one-time-code dialog, collection queue with code entry, manager cancel) and
+customers gain a live rewards store (self-redemption against the real
+balance) plus a live redemption history (reference + ••••last4 — the full
+code is deliberately never re-readable — and self-cancel with refund). All
+behind `isSupabaseConfigured()`; prototype surfaces stay and are labeled.
+
+Proof: harness **78/78** (new RE1–RE9, `RLS_TEST_RESULTS.md` Run 5); pgTAP
+mirror at **155 assertions**, executed locally for the first time through
+the new `scripts/rls-check/pgtap-run.mjs` stub runner (which also fixed a
+pre-existing plan(107) undercount — the series really execute 109); tsc/lint
+clean (warnings match pre-existing app-wide idioms), unit tests 8/8, build +
+39/39 route smoke.
+
+Next per §4: production QR (signed membership codes), then the
+realtime/storage slices. The loyalty rule engine
+(`loyalty_rules`/`rule_versions`/`rule_sets`) replacing the launch-policy
+columns is the designed follow-up on the loyalty track. GST invoicing is
+**not** a slice here: proposal decision D12 keeps billing (and GST
+invoice-of-record) in the business's existing software unless it is
+separately scoped as its own workstream.
 
 ---
 
