@@ -588,3 +588,55 @@ pgTAP stub run: 222 ok, 0 not ok — PASSED
   economics, move `effective_from`, or reopen a closed window. Deletion is deliberately *not*
   blocked by the trigger: a version must cascade away with its business, and grants already stop
   every API role from deleting one.
+
+## Run 8 — Step 3 Slice 7: persistent in-app notifications + Realtime (101 cases)
+
+Executed 2026-09-06 against PostgreSQL 18.4 (embedded, throwaway database `rewardly_test`).
+Pipeline: 00_stubs.sql → supabase/migrations/* (**10 files**, incl.
+`20260906180000_notifications.sql`) → supabase/seed.sql → **101 assertion cases**
+(S/A/W/R/V + L + SA + INV + RE + QR + LR + new **NT1–NT7**).
+
+```
+… (94 earlier cases unchanged — see Runs 1–7) …
+PASS  NT1 notifications — events are emitted by the facts that cause them
+PASS  NT2 notifications — recipients see only what they are authorized to see
+PASS  NT3 notifications — cross-tenant and cross-store access is denied
+PASS  NT4 notifications — read state is per profile and persists
+PASS  NT5 notifications — duplicate and replayed events never duplicate rows
+PASS  NT6 notifications — low stock alerts only where configured, only on crossing
+PASS  NT7 notifications — Realtime exposure is limited to the event table
+
+101/101 RLS cases passed.
+```
+
+pgTAP mirror grew from 222 to **264 assertions** (42 NT assertions):
+
+```
+APPLIED stubs + migrations + seed
+
+pgTAP stub run: 264 ok, 0 not ok — PASSED
+```
+
+### The five §5 required tests, and where they are proven
+
+| §5 requirement | Case |
+| --- | --- |
+| Customer/business user receives only authorized notifications | NT2 — customer sees own membership only and zero business rows; cashier sees neither customer rows nor owner-scoped ones; owner sees the owner-scoped ones |
+| Cross-tenant/store access is denied | NT3 — the other tenant reads nothing and cannot mark read (42501); a satellite-store alert is invisible to the main-store cashier but visible to the assigned one |
+| Read/mark-all state persists | NT4 — read rows survive, are personal (the owner cannot see or forge the cashier's), mark-all is audience-scoped and returns 0 on a second run, and the business mark-all leaves the customer bell alone |
+| Duplicate/reconnect events do not duplicate activity or points | NT5 — an idempotency-key sale replay emits nothing new, a duplicate `dedupe_key` is a unique violation, and `notify_emit` returns null instead of aborting its caller. Client-side: `tests/notification-merge.test.mjs` proves the list merge is replay-safe and that read state is monotonic |
+| UI works with Realtime unavailable | The hook treats Realtime as an accelerator, not a dependency: the initial state comes from an ordinary RLS-filtered fetch, `SUBSCRIBED` triggers a catch-up resync, and `CHANNEL_ERROR`/`TIMED_OUT`/`offline` degrade to a visible "Reconnecting…/Offline" line with a Retry that refetches. With Supabase unconfigured the component renders the prototype bell unchanged (verified in a real browser) |
+
+### Notes from writing the suite
+
+- **Two flaky assertions were my fault, not the code's.** NT1 first selected "the customer's points
+  notification" without pinning it to the sale under test — the seeded member has earned points in
+  earlier cases, so `select … into` picked an arbitrary row and the case passed or failed depending
+  on plan order. Pinning on `source_id` made it deterministic across three consecutive runs. NT6
+  had the same shape (`order by created_at desc limit 1` with same-transaction timestamps) and now
+  matches on the `low-stock:` dedupe prefix.
+- **`qr_verification_attempts` timestamps are `attempted_at`, not `created_at`.** The invalid-scan
+  burst detector failed closed on the first run, which is the right direction for a trigger to fail
+  but still a bug; caught by QR3/QR8 rather than by a notification case.
+- **Emitting from triggers keeps the blast radius at zero.** Ten prior migrations' RPC bodies are
+  untouched by this slice; the whole notification surface is additive.

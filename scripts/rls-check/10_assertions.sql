@@ -3557,3 +3557,341 @@ begin
     raise exception 'ASSERT: sale priced by the wrong version: %', v_res;
   end if;
 end $$;
+
+-- CASE: NT1 notifications — events are emitted by the facts that cause them
+do $$
+declare v_mem uuid; v_res jsonb; v_n int; v_note record;
+begin
+  execute 'reset role';
+  -- Rahul's seeded membership (one per profile per business), so the customer
+  -- notifications below land on a real signed-in identity.
+  select id into v_mem from public.customer_memberships
+   where membership_no = 'AE-DEVRAHUL1';
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Conduit pipe","qty":1,"unit_price_paise":60000}]'::jsonb,
+    '[{"method":"cash","amount_paise":60000}]'::jsonb,
+    v_mem, 0, 'nt1-key'
+  ) into v_res;
+  execute 'reset role';
+
+  -- The points award notified the customer, scoped to their membership.
+  -- Pinned to THIS sale: the seeded member has earned points before, and a
+  -- loose match would pick an arbitrary one of those rows.
+  select * into v_note from public.notifications
+   where audience = 'customer' and customer_membership_id = v_mem
+     and category = 'points' and source_id = (v_res ->> 'sale_id')::uuid;
+  if v_note.id is null then raise exception 'ASSERT: no points notification emitted'; end if;
+  if v_note.business_id <> 'aaaaaaaa-0000-4000-8000-000000000001' then
+    raise exception 'ASSERT: points notification has the wrong tenant';
+  end if;
+  if v_note.source_type <> 'points_ledger' or v_note.source_id is null then
+    raise exception 'ASSERT: points notification has no payload reference';
+  end if;
+  if v_note.title !~ 'points added' then
+    raise exception 'ASSERT: unexpected points title: %', v_note.title;
+  end if;
+
+  -- A rule change notified the business (LR4 published v2 earlier).
+  select count(*) into v_n from public.notifications
+   where audience = 'business' and category = 'rule'
+     and business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n < 1 then raise exception 'ASSERT: no rule-change notification'; end if;
+
+  -- Version 1 (installed at signup) is deliberately not news.
+  select count(*) into v_n from public.notifications
+   where category = 'rule' and (metadata ->> 'version')::int = 1;
+  if v_n <> 0 then raise exception 'ASSERT: launch policy should not notify'; end if;
+
+  -- A staff invitation notified the owner (seeded pending invitation).
+  select count(*) into v_n from public.notifications
+   where audience = 'business' and category = 'staff' and min_role = 'owner';
+  if v_n < 1 then raise exception 'ASSERT: no invitation notification'; end if;
+end $$;
+
+-- CASE: NT2 notifications — recipients see only what they are authorized to see
+do $$
+declare v_n int; v_mem uuid;
+begin
+  execute 'reset role';
+  select id into v_mem from public.customer_memberships
+   where membership_no = 'AE-DEVRAHUL1';
+
+  execute 'set local role authenticated';
+
+  -- The customer sees their own points notification and no business events.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_n from public.notifications
+   where customer_membership_id = v_mem;
+  if v_n < 1 then raise exception 'ASSERT: customer cannot see their own notification'; end if;
+  select count(*) into v_n from public.notifications where audience = 'business';
+  if v_n <> 0 then raise exception 'ASSERT: customer can see % business notifications', v_n; end if;
+
+  -- Another customer sees none of it.
+  perform set_config('request.jwt.claims', '{"sub":"66666666-6666-4666-8666-666666666666","role":"authenticated"}', true);
+  select count(*) into v_n from public.notifications where customer_membership_id = v_mem;
+  if v_n <> 0 then raise exception 'ASSERT: another customer can read this membership''s notifications'; end if;
+
+  -- A cashier does not see owner-only staff events, but does see staff ones.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_n from public.notifications where min_role = 'owner';
+  if v_n <> 0 then raise exception 'ASSERT: cashier can read owner-only notifications'; end if;
+  select count(*) into v_n from public.notifications where audience = 'customer';
+  if v_n <> 0 then raise exception 'ASSERT: cashier can read customer notifications'; end if;
+
+  -- The owner sees the owner-scoped ones.
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select count(*) into v_n from public.notifications where min_role = 'owner';
+  if v_n < 1 then raise exception 'ASSERT: owner cannot see owner-scoped notifications'; end if;
+
+  execute 'reset role';
+end $$;
+
+-- CASE: NT3 notifications — cross-tenant and cross-store access is denied
+do $$
+declare v_n int; v_id uuid; v_sqlstate text;
+begin
+  execute 'reset role';
+  -- A satellite-store event that the main-store cashier must not see.
+  insert into public.notifications
+    (business_id, store_id, audience, min_role, category, title, dedupe_key)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000002',
+          'business', 'staff', 'stock', 'Satellite-only alert', 'nt3-satellite')
+  returning id into v_id;
+
+  execute 'set local role authenticated';
+
+  -- Store-scoped staff at the main store: out of scope, invisible.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select count(*) into v_n from public.notifications where id = v_id;
+  if v_n <> 0 then raise exception 'ASSERT: store scoping not enforced on notifications'; end if;
+  -- …and they cannot mark it read either (same predicate, one definition).
+  begin
+    perform public.mark_notification_read(v_id);
+    raise exception 'ASSERT: out-of-scope notification could be marked read';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- The satellite cashier does see it.
+  perform set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+  select count(*) into v_n from public.notifications where id = v_id;
+  if v_n <> 1 then raise exception 'ASSERT: assigned staff cannot see their store''s alert'; end if;
+
+  -- The other tenant sees nothing of ours, by id or in bulk.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select count(*) into v_n from public.notifications
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  if v_n <> 0 then raise exception 'ASSERT: cross-tenant notification leak'; end if;
+  begin
+    perform public.mark_notification_read(v_id);
+    raise exception 'ASSERT: cross-tenant mark-read allowed';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Nobody writes notifications directly — they are trigger-emitted only.
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  begin
+    insert into public.notifications
+      (business_id, audience, min_role, category, title, dedupe_key)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'business', 'staff', 'system', 'Fake', 'nt3-fake');
+    raise exception 'ASSERT: owner inserted a notification directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform public.notify_emit(
+      'aaaaaaaa-0000-4000-8000-000000000001', 'business', 'system', 'Fake', 'nt3-fake2');
+    raise exception 'ASSERT: notify_emit is callable by clients';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+end $$;
+
+-- CASE: NT4 notifications — read state is per profile and persists
+do $$
+declare v_id uuid; v_n int; v_before int; v_marked int;
+begin
+  execute 'reset role';
+  select id into v_id from public.notifications
+   where dedupe_key = 'nt3-satellite';
+
+  execute 'set local role authenticated';
+  -- Satellite cashier reads it.
+  perform set_config('request.jwt.claims', '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}', true);
+  v_before := public.unread_notification_count('business');
+  if v_before < 1 then raise exception 'ASSERT: expected unread business notifications'; end if;
+  perform public.mark_notification_read(v_id);
+  if public.unread_notification_count('business') <> v_before - 1 then
+    raise exception 'ASSERT: unread count did not drop after marking read';
+  end if;
+  -- Idempotent: a second call (another tab, a retry) changes nothing.
+  perform public.mark_notification_read(v_id);
+  if public.unread_notification_count('business') <> v_before - 1 then
+    raise exception 'ASSERT: duplicate mark-read changed the count';
+  end if;
+
+  execute 'reset role';
+  select count(*) into v_n from public.notification_reads where notification_id = v_id;
+  if v_n <> 1 then raise exception 'ASSERT: expected exactly one read row, got %', v_n; end if;
+
+  -- The owner has NOT read it — read state is personal, not shared.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
+  select count(*) into v_n from public.notification_reads;
+  if v_n <> 0 then raise exception 'ASSERT: owner can see another profile''s read state'; end if;
+
+  -- Mark-all is scoped to one audience and reports what it changed.
+  v_marked := public.mark_all_notifications_read('business');
+  if v_marked < 1 then raise exception 'ASSERT: mark-all marked nothing'; end if;
+  if public.unread_notification_count('business') <> 0 then
+    raise exception 'ASSERT: business notifications still unread after mark-all';
+  end if;
+  -- Running it again is a no-op, not an error.
+  if public.mark_all_notifications_read('business') <> 0 then
+    raise exception 'ASSERT: mark-all was not idempotent';
+  end if;
+
+  -- The customer's own bell is untouched by the business mark-all.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  if public.unread_notification_count('customer') < 1 then
+    raise exception 'ASSERT: business mark-all cleared the customer bell';
+  end if;
+
+  -- Read rows are personal: nobody can forge one for someone else.
+  begin
+    insert into public.notification_reads (notification_id, profile_id)
+    values (v_id, '88888888-8888-4888-8888-888888888888');
+    raise exception 'ASSERT: a read row could be forged for another profile';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+end $$;
+
+-- CASE: NT5 notifications — duplicate and replayed events never duplicate rows
+do $$
+declare v_mem uuid; v_res jsonb; v_n int; v_before int;
+begin
+  execute 'reset role';
+  select id into v_mem from public.customer_memberships where membership_no = 'AE-DEVRAHUL1';
+  select count(*) into v_before from public.notifications;
+
+  -- Replaying a sale on its idempotency key returns the stored sale and
+  -- emits nothing new (the ledger entry it would notify about never happens).
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Conduit pipe","qty":1,"unit_price_paise":60000}]'::jsonb,
+    '[{"method":"cash","amount_paise":60000}]'::jsonb,
+    v_mem, 0, 'nt1-key'
+  ) into v_res;
+  execute 'reset role';
+
+  if (v_res ->> 'replayed')::boolean is not true then
+    raise exception 'ASSERT: expected an idempotent replay';
+  end if;
+  select count(*) into v_n from public.notifications;
+  if v_n <> v_before then
+    raise exception 'ASSERT: a replayed sale emitted % extra notification(s)', v_n - v_before;
+  end if;
+  select count(*) into v_n from public.notifications
+   where audience = 'customer' and customer_membership_id = v_mem
+     and category = 'points' and source_id = (v_res ->> 'sale_id')::uuid;
+  if v_n <> 1 then raise exception 'ASSERT: % points notifications for one sale', v_n; end if;
+
+  -- The dedupe key is a hard constraint, not a convention.
+  begin
+    insert into public.notifications
+      (business_id, audience, min_role, category, title, dedupe_key)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'business', 'staff', 'system',
+            'Duplicate attempt', 'nt3-satellite');
+    raise exception 'ASSERT: duplicate dedupe_key accepted';
+  exception when unique_violation then null;
+  end;
+
+  -- notify_emit swallows duplicates rather than aborting its caller's
+  -- transaction: a repeat returns null, and the sale/stock move still commits.
+  if public.notify_emit(
+       'aaaaaaaa-0000-4000-8000-000000000001', 'business', 'system',
+       'Duplicate attempt', 'nt3-satellite', null, null, 'staff') is not null then
+    raise exception 'ASSERT: notify_emit re-inserted a duplicate';
+  end if;
+end $$;
+
+-- CASE: NT6 notifications — low stock alerts only where configured, only on crossing
+do $$
+declare v_prod uuid; v_n int; v_before int;
+begin
+  execute 'reset role';
+  select id into v_prod from public.products
+   where business_id = 'aaaaaaaa-0000-4000-8000-000000000001' limit 1;
+
+  -- reorder_level 0 = the business never asked to be told.
+  update public.inventory_by_store
+     set reorder_level = 0, on_hand = 100
+   where product_id = v_prod and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  select count(*) into v_before from public.notifications where category = 'stock';
+  update public.inventory_by_store set on_hand = 1
+   where product_id = v_prod and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  select count(*) into v_n from public.notifications where category = 'stock';
+  if v_n <> v_before then raise exception 'ASSERT: alerted with no reorder level configured'; end if;
+
+  -- Configure a threshold and cross it.
+  update public.inventory_by_store
+     set reorder_level = 10, on_hand = 50
+   where product_id = v_prod and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  update public.inventory_by_store set on_hand = 8
+   where product_id = v_prod and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  select count(*) into v_n from public.notifications where category = 'stock';
+  if v_n <> v_before + 1 then raise exception 'ASSERT: crossing the reorder level did not alert'; end if;
+
+  -- Staying below the line does not re-alert at the same level.
+  update public.inventory_by_store set on_hand = 8
+   where product_id = v_prod and store_id = 'bbbbbbbb-0000-4000-8000-000000000001';
+  select count(*) into v_n from public.notifications where category = 'stock';
+  if v_n <> v_before + 1 then raise exception 'ASSERT: low stock alert repeated without a new crossing'; end if;
+
+  -- Low stock is a manager concern, scoped to the affected store.
+  if not exists (
+    select 1 from public.notifications
+     where category = 'stock' and min_role = 'manager'
+       and store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+  ) then
+    raise exception 'ASSERT: low stock alert is not manager/store scoped';
+  end if;
+end $$;
+
+-- CASE: NT7 notifications — Realtime exposure is limited to the event table
+do $$
+declare v_n int;
+begin
+  execute 'reset role';
+  -- notifications is published (when the Supabase publication exists);
+  -- notification_reads never is — read state is personal and high-frequency.
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    select count(*) into v_n from pg_publication_tables
+     where pubname = 'supabase_realtime' and schemaname = 'public'
+       and tablename = 'notification_reads';
+    if v_n <> 0 then raise exception 'ASSERT: read state is published to Realtime'; end if;
+  end if;
+
+  -- Anonymous sockets get nothing at all.
+  if has_table_privilege('anon', 'public.notifications', 'SELECT') then
+    raise exception 'ASSERT: anon can select notifications';
+  end if;
+  if has_function_privilege('anon', 'public.unread_notification_count(text)', 'EXECUTE') then
+    raise exception 'ASSERT: anon can count notifications';
+  end if;
+
+  -- No DML grants anywhere: the only writer is a trigger.
+  if has_table_privilege('authenticated', 'public.notifications', 'INSERT')
+     or has_table_privilege('authenticated', 'public.notifications', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.notifications', 'DELETE')
+     or has_table_privilege('authenticated', 'public.notification_reads', 'INSERT') then
+    raise exception 'ASSERT: notifications are directly writable by API roles';
+  end if;
+end $$;

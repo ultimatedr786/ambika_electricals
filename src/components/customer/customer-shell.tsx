@@ -28,7 +28,7 @@ const GlobalSearch = dynamic(
   () => import("@/components/shared/global-search").then((m) => m.GlobalSearch),
   { ssr: false }
 );
-import { NotificationCenter } from "@/components/shared/notification-center";
+import { LiveNotificationCenter } from "@/components/shared/live-notification-center";
 import { useCurrentCustomer } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { usePrefetchOnIntent } from "@/hooks/use-prefetch";
@@ -236,7 +236,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
                 )}
               </Link>
             </Button>
-            <NotificationCenter scope="customer" />
+            <LiveNotificationCenter audience="customer" />
             <ThemeToggle />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

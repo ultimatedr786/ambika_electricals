@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(222);
+select plan(264);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -1763,6 +1763,311 @@ select is(
      now() + interval '8 days')).version,
   3,
   'LR8: the scheduled version takes effect on its date'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Persistent in-app notifications (20260906180000_notifications.sql)
+-- Mirrors cases NT1-NT7 of scripts/rls-check/10_assertions.sql.
+-- ---------------------------------------------------------------------------
+
+-- NT1: the facts emit their own notifications.
+select set_config('app.nt_sale',
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(
+       ''bbbbbbbb-0000-4000-8000-000000000001'',
+       ''[{"name":"Conduit pipe","qty":1,"unit_price_paise":60000}]''::jsonb,
+       ''[{"method":"cash","amount_paise":60000}]''::jsonb,
+       (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1''),
+       0, ''pgtap-nt1'')::text'), true);
+select is(
+  (select count(*) from public.notifications
+    where audience = 'customer' and category = 'points'
+      and source_id = (current_setting('app.nt_sale', true)::jsonb ->> 'sale_id')::uuid)::int,
+  1,
+  'NT1: a sale''s points award notifies the customer exactly once'
+);
+select is(
+  (select source_type from public.notifications
+    where source_id = (current_setting('app.nt_sale', true)::jsonb ->> 'sale_id')::uuid
+      and category = 'points'),
+  'points_ledger',
+  'NT1: the notification carries a payload reference'
+);
+select ok(
+  (select count(*) from public.notifications
+    where audience = 'business' and category = 'rule') >= 1,
+  'NT1: a loyalty rule change notifies the business'
+);
+select is(
+  (select count(*) from public.notifications
+    where category = 'rule' and (metadata ->> 'version')::int = 1)::int,
+  0,
+  'NT1: the launch policy installed at signup is not news'
+);
+select ok(
+  (select count(*) from public.notifications
+    where audience = 'business' and category = 'staff' and min_role = 'owner') >= 1,
+  'NT1: a staff invitation notifies the owner'
+);
+
+-- NT2: recipients see only what they are authorized to see.
+select ok(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.notifications') >= 1,
+  'NT2: the customer sees their own notifications'
+);
+select is(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select count(*) from public.notifications where audience = ''business'''),
+  0::bigint,
+  'NT2: a customer never sees business notifications'
+);
+select is(
+  extensions.count_as('authenticated', '66666666-6666-4666-8666-666666666666',
+    'select count(*) from public.notifications
+      where customer_membership_id =
+        (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1'')'),
+  0::bigint,
+  'NT2: one customer cannot read another customer''s notifications'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.notifications where min_role = ''owner'''),
+  0::bigint,
+  'NT2: a cashier cannot read owner-scoped notifications'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.notifications where audience = ''customer'''),
+  0::bigint,
+  'NT2: a cashier cannot read customer notifications'
+);
+select ok(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select count(*) from public.notifications where min_role = ''owner''') >= 1,
+  'NT2: the owner sees owner-scoped notifications'
+);
+
+-- NT3: cross-tenant and cross-store denial.
+select lives_ok(
+  $$insert into public.notifications
+      (business_id, store_id, audience, min_role, category, title, dedupe_key)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000002',
+            'business', 'staff', 'stock', 'Satellite-only alert', 'pgtap-nt3')$$,
+  'NT3: seed a satellite-store alert as the maintenance role'
+);
+select is(
+  extensions.count_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select count(*) from public.notifications where dedupe_key = ''pgtap-nt3'''),
+  0::bigint,
+  'NT3: store scoping hides another store''s alert from scoped staff'
+);
+select is(
+  extensions.count_as('authenticated', '44444444-4444-4444-8444-444444444444',
+    'select count(*) from public.notifications where dedupe_key = ''pgtap-nt3'''),
+  1::bigint,
+  'NT3: the assigned cashier does see their store''s alert'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.mark_notification_read(
+       (select id from public.notifications where dedupe_key = ''pgtap-nt3''))'),
+  '42501',
+  'NT3: an out-of-scope notification cannot be marked read'
+);
+select is(
+  extensions.count_as('authenticated', '99999999-9999-4999-8999-999999999999',
+    'select count(*) from public.notifications
+      where business_id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  0::bigint,
+  'NT3: notifications never cross tenants'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'insert into public.notifications (business_id, audience, min_role, category, title, dedupe_key)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''business'', ''staff'', ''system'',
+             ''Fake'', ''pgtap-fake'')'),
+  '42501',
+  'NT3: even the owner cannot write a notification directly'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.notify_emit(''aaaaaaaa-0000-4000-8000-000000000001'',
+       ''business'', ''system'', ''Fake'', ''pgtap-fake2'')'),
+  '42501',
+  'NT3: notify_emit is internal, not a client API'
+);
+
+-- NT4: read state is personal, persistent and idempotent.
+select is(
+  extensions.text_as('authenticated', '44444444-4444-4444-8444-444444444444',
+    'select public.mark_notification_read(
+       (select id from public.notifications where dedupe_key = ''pgtap-nt3''))::text'),
+  'true',
+  'NT4: the assigned cashier can mark their alert read'
+);
+select is(
+  (select count(*) from public.notification_reads r
+     join public.notifications n on n.id = r.notification_id
+    where n.dedupe_key = 'pgtap-nt3')::int,
+  1,
+  'NT4: exactly one read row exists'
+);
+select is(
+  extensions.text_as('authenticated', '44444444-4444-4444-8444-444444444444',
+    'select public.mark_notification_read(
+       (select id from public.notifications where dedupe_key = ''pgtap-nt3''))::text'),
+  'true',
+  'NT4: marking read twice is idempotent, not an error'
+);
+select is(
+  (select count(*) from public.notification_reads r
+     join public.notifications n on n.id = r.notification_id
+    where n.dedupe_key = 'pgtap-nt3')::int,
+  1,
+  'NT4: the duplicate mark-read added no second row'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select count(*) from public.notification_reads'),
+  0::bigint,
+  'NT4: read state is personal — the owner sees none of the cashier''s'
+);
+select ok(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.mark_all_notifications_read(''business'')') >= 1,
+  'NT4: mark-all reports how many rows it changed'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.unread_notification_count(''business'')'),
+  0::bigint,
+  'NT4: the business bell is empty after mark-all'
+);
+select is(
+  extensions.count_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'select public.mark_all_notifications_read(''business'')'),
+  0::bigint,
+  'NT4: a second mark-all is a no-op'
+);
+select ok(
+  extensions.count_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'select public.unread_notification_count(''customer'')') >= 1,
+  'NT4: the business mark-all did not clear the customer bell'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '55555555-5555-4555-8555-555555555555',
+    'insert into public.notification_reads (notification_id, profile_id)
+     select id, ''88888888-8888-4888-8888-888888888888'' from public.notifications limit 1'),
+  '42501',
+  'NT4: a read row cannot be forged for another profile'
+);
+
+-- NT5: duplicates and replays never produce a second row.
+select is(
+  extensions.text_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(
+       ''bbbbbbbb-0000-4000-8000-000000000001'',
+       ''[{"name":"Conduit pipe","qty":1,"unit_price_paise":60000}]''::jsonb,
+       ''[{"method":"cash","amount_paise":60000}]''::jsonb,
+       (select id from public.customer_memberships where membership_no = ''AE-DEVRAHUL1''),
+       0, ''pgtap-nt1'') ->> ''replayed'''),
+  'true',
+  'NT5: the same idempotency key replays the stored sale'
+);
+select is(
+  (select count(*) from public.notifications
+    where audience = 'customer' and category = 'points'
+      and source_id = (current_setting('app.nt_sale', true)::jsonb ->> 'sale_id')::uuid)::int,
+  1,
+  'NT5: the replay emitted no second notification'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'insert into public.notifications (business_id, audience, min_role, category, title, dedupe_key)
+     values (''aaaaaaaa-0000-4000-8000-000000000001'', ''business'', ''staff'', ''system'',
+             ''Dup'', ''pgtap-nt3'')'),
+  '23505',
+  'NT5: the dedupe key is a hard constraint'
+);
+select is(
+  (select public.notify_emit('aaaaaaaa-0000-4000-8000-000000000001', 'business', 'system',
+     'Dup', 'pgtap-nt3', null, null, 'staff')),
+  null::uuid,
+  'NT5: notify_emit swallows a duplicate instead of aborting its caller'
+);
+
+-- NT6: low stock only where configured, only on the crossing.
+select lives_ok(
+  $$update public.inventory_by_store set reorder_level = 0, on_hand = 100
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: clear the reorder level for the probe product'
+);
+select set_config('app.nt_stock_before',
+  (select count(*) from public.notifications where category = 'stock')::text, true);
+select lives_ok(
+  $$update public.inventory_by_store set on_hand = 1
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: drop the stock with no threshold configured'
+);
+select is(
+  (select count(*) from public.notifications where category = 'stock')::int,
+  current_setting('app.nt_stock_before', true)::int,
+  'NT6: no alert when the business has not configured a reorder level'
+);
+select lives_ok(
+  $$update public.inventory_by_store set reorder_level = 10, on_hand = 50
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: configure a reorder level'
+);
+select lives_ok(
+  $$update public.inventory_by_store set on_hand = 8
+     where store_id = 'bbbbbbbb-0000-4000-8000-000000000001'
+       and product_id = (select id from public.products
+                          where business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
+                          order by sku limit 1)$$,
+  'NT6: cross the reorder level'
+);
+select is(
+  (select count(*) from public.notifications where category = 'stock')::int,
+  current_setting('app.nt_stock_before', true)::int + 1,
+  'NT6: crossing the reorder level raises exactly one alert'
+);
+select is(
+  (select distinct min_role::text from public.notifications
+    where category = 'stock' and dedupe_key like 'low-stock:%'),
+  'manager',
+  'NT6: low stock is a manager-scoped alert'
+);
+
+-- NT7: Realtime exposure and grants.
+select ok(
+  not has_table_privilege('anon', 'public.notifications', 'SELECT'),
+  'NT7: anonymous sockets cannot read notifications'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.notifications', 'INSERT')
+  and not has_table_privilege('authenticated', 'public.notifications', 'UPDATE')
+  and not has_table_privilege('authenticated', 'public.notifications', 'DELETE')
+  and not has_table_privilege('authenticated', 'public.notification_reads', 'INSERT'),
+  'NT7: notifications are trigger-written and RPC-read only'
+);
+select is(
+  (select count(*) from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public'
+      and tablename = 'notification_reads')::int,
+  0,
+  'NT7: personal read state is never published to Realtime'
 );
 
 select * from finish();

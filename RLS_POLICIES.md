@@ -61,6 +61,8 @@ Role helpers (`SECURITY DEFINER`, fixed `search_path`, no policy recursion):
 | `qr_verification_attempts` SELECT | ✗ | ✗ | whole business | whole business | security trail of every scan (success and failure). Append-only: no DML grants **and** a trigger that rejects UPDATE/DELETE even for postgres. Deliberately invisible to cashiers so the trail cannot be shoulder-audited at the counter |
 | `loyalty_rules` SELECT | own businesses (active membership) | whole business | whole business | whole business | the rule *series*; writes RPC-only (`set_loyalty_rule`) |
 | `loyalty_rule_versions` SELECT | **only the version in force right now** | whole history | whole history | whole history | immutable economics + effective window. A trigger rejects any UPDATE touching `earn_*`, `point_value_paise`, `min_spend_paise`, `points_expiry_days`, `effective_from` or `version`, and refuses to reopen a closed window; only `effective_to`/`status`/`notes` move. Deletion is blocked by grants (it must still cascade with its business) |
+| `notifications` SELECT | **own membership's** customer notifications only | business ones at/above their role, **and only for stores they are assigned to** | ← same (role floor applies) | ← same | the event row, shared by everyone entitled to it. Written **only by triggers**; no INSERT/UPDATE/DELETE grants for any API role. Unique `(business_id, dedupe_key)` makes replay impossible at the storage layer |
+| `notification_reads` SELECT | own rows only | own rows only | own rows only | own rows only | per-profile read state, so one low-stock alert can be read independently by three cashiers. Writes are RPC-only; a row can never be forged for another profile. **Not published to Realtime** — read state is personal and high-frequency |
 
 Cross-tenant: every predicate is `business_id ∈ my_businesses(...)` or an ownership/store
 membership check — a user of business A gets **zero rows** from business B for any identifier they
@@ -115,6 +117,10 @@ in `src/lib/supabase/admin.ts`).
 | `loyalty_points_for` | any authenticated reader | pure evaluation of one version against an eligible amount: floors on exact paise, honours the minimum spend, returns 0 for an unknown version | — |
 | `create_sale` v3 | staff+ | Slice-3 semantics **plus**: the rate comes from `active_loyalty_rule_version(business, now())` instead of the dropped `businesses.earn_*` columns, and that version id is stamped on `sales.loyalty_rule_version_id`. A business with no rule fails closed (`loyalty_rule_missing`) | `sale.created` (+ `loyalty_rule_version` in metadata) |
 | `ledger_post_entry` v2 | — internal — | unchanged contract; every entry whose `source_id` is a sale inherits that sale's pinned rule version, so the void reversal is stamped too | — |
+| `mark_notification_read` | any authenticated recipient | authorizes through `can_see_notification` — the **same predicate as the RLS policy**, so a user can never mark read something they could not see; idempotent (`on conflict do nothing`) | — |
+| `mark_all_notifications_read` | any authenticated recipient | optional audience filter keeps the business bell and the customer bell independent; returns how many rows actually changed, so a second call is a truthful 0 | — |
+| `unread_notification_count` | any authenticated recipient | one round trip for the badge instead of fetching the list | — |
+| `notify_emit` | — internal — | EXECUTE revoked from every API role; the single insertion point for all six emitters. Returns null on a duplicate instead of raising, because it runs inside somebody else's transaction and must never abort the sale/redemption/stock move that produced it | — |
 
 **Denial auditing:** a SQL statement that raises rolls back everything it wrote, so *denied*
 attempts (`invitation.create_denied`, `invitation.accept_denied`, …) are recorded by the calling
@@ -135,8 +141,8 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **94 cases, 94 passed** (Step 2 suite executed 2026-09-05;
-ledger + sales + inventory + rewards/redemptions + membership-QR + loyalty-rule suites 2026-09-06, against PostgreSQL 18.4 with
+`scripts/rls-check/10_assertions.sql` — **101 cases, 101 passed** (Step 2 suite executed 2026-09-05;
+ledger + sales + inventory + rewards/redemptions + membership-QR + loyalty-rule + notification suites 2026-09-06, against PostgreSQL 18.4 with
 the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
 
 - **S1–S9** schema: profile bootstrap trigger, email-sync trigger, membership-no generation/format,
@@ -224,18 +230,37 @@ the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
   resolver never crosses businesses, staff read their own history, customers see only the version
   in force, and even the owner cannot INSERT a rule directly or call the internal resolver. A
   version scheduled for next week does not price today's sale — but does resolve on its date.
+- **NT1–NT7** notifications: the six emitters fire from the facts themselves — a sale's points
+  award notifies the customer once with a payload reference, a rule change notifies the business
+  (but the launch policy installed at signup does not), and an invitation notifies the owner.
+  Authorization is per audience and per role: a customer sees only their own membership's rows and
+  no business events, one customer cannot read another's, a cashier sees neither customer rows nor
+  owner-scoped ones, and a satellite-store alert is invisible to the main-store cashier while the
+  assigned cashier does see it. Cross-tenant reads return nothing and cross-tenant mark-read is
+  42501 — the RPC reuses the RLS predicate, so the two cannot disagree. Nobody writes directly:
+  owner INSERTs and direct `notify_emit` calls are both 42501. Read state is personal, persistent
+  and idempotent: marking read twice leaves one row, the owner cannot see the cashier's read rows
+  or forge one, mark-all is audience-scoped and reports 0 on a second run, and clearing the
+  business bell leaves the customer bell untouched. Replays cannot duplicate: an idempotency-key
+  sale replay emits nothing new, a duplicate `dedupe_key` is a unique violation, and `notify_emit`
+  swallows it rather than aborting its caller. Low stock alerts only where a reorder level is
+  configured and only on the crossing (never repeatedly below the line), manager- and store-scoped.
+  Realtime exposure is limited to the event table; `anon` has no SELECT and no EXECUTE.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 222 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 264 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
 additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
 harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/lives_ok/throws_ok/finish):
-**222/222 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
+**264/264 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
 (the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices
 
-- No Realtime publication entries for these tables — nothing broadcasts auth/tenancy data yet;
-  realtime authorization is designed with its own slice.
+- Realtime: **only `public.notifications` is published**, and Supabase applies its SELECT policy
+  per subscriber, so a socket physically cannot deliver another tenant's (or another store's) row.
+  `notification_reads` is deliberately unpublished — read state is personal, high-frequency and
+  already known to the tab that changed it. Replica identity stays at the default (primary key);
+  `FULL` would ship unfiltered old rows to subscribers. No other table broadcasts.
 - No Storage buckets yet (product image migration is a later slice).
 - Manager scoped permissions (e.g. managing staff for assigned stores) are **not** granted by
   default — “never owner-only controls unless explicitly granted” (spec 2.x). Extending managers
@@ -299,4 +324,18 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/liv
   it is a promise the system would silently break. Deferred: per-store and per-category rule
   series (the tables are already keyed for them), rule simulation/preview against past sales, and
   bonus-points stacking (`sales.bonus_points` stays 0).
+- Notification decisions: the event and the read state are **separate tables** because a low-stock
+  alert is one fact that three cashiers read independently — a boolean on the event row could not
+  represent that, and two sessions marking it read would clobber each other. Marking read is
+  therefore an INSERT of your own row, never an UPDATE of shared state. Emission is by **trigger,
+  not by editing the eleven RPCs** that cause these events: the trigger fires in the same
+  transaction, so a rolled-back sale leaves no phantom alert and any future code path that writes
+  the same row still notifies — and the tested RPC bodies stay untouched (the rule-engine slice
+  showed what reimplementing a working function costs). De-duplication is structural rather than
+  best-effort: every emitter computes a deterministic `dedupe_key` and inserts
+  `on conflict do nothing`, which is why "a reconnect does not duplicate activity" is a database
+  property with a test, not a promise about client code. Low-stock fires only on the *crossing* of
+  a configured reorder level — a busy Saturday must not bury the notification centre in the same
+  alert. Deferred: web push and email fan-out (§5 explicitly keeps push separate), per-user
+  notification preferences (§6 owns settings), digesting/grouping, and a retention sweeper.
 
