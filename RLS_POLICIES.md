@@ -152,7 +152,7 @@ for correctness.
 
 ## 5. Test coverage & results
 
-`scripts/rls-check/10_assertions.sql` — **109 cases, 109 passed** (Step 2 suite executed 2026-09-05;
+`scripts/rls-check/10_assertions.sql` — **110 cases, 110 passed** (Step 2 suite executed 2026-09-05;
 ledger + sales + inventory + rewards/redemptions + membership-QR + loyalty-rule + notification + storage/settings suites 2026-09-06, against PostgreSQL 18.4 with
 the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
 
@@ -271,11 +271,11 @@ the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
   `security` and unknown categories, reject outsiders and replace rather than duplicate. `anon` can
   call none of it.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 306 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 309 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
 additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
 harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/lives_ok/throws_ok/finish):
-**306/306 passed** (2026-09-06). CI additionally runs this file against the **real pgTAP extension** on the PostgreSQL image Supabase ships, so the stub runner is no longer the only evidence. An earlier run also surfaced a pre-existing off-by-two `plan()` count
+**309/309 passed** (2026-09-06). CI additionally runs this file against the **real pgTAP extension** on the PostgreSQL image Supabase ships, so the stub runner is no longer the only evidence. An earlier run also surfaced a pre-existing off-by-two `plan()` count
 (the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices
@@ -378,4 +378,14 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/liv
   so the UI does not imply a permission the server will refuse. Deferred: tier configuration,
   campaign settings, per-store notification routing, and image cropping/resizing (uploads are
   stored as sent; width/height columns exist for when a resize step lands).
+- Trigger functions are not client-callable. PostgreSQL grants EXECUTE to PUBLIC on every new
+  function, so `notify_on_*`, the `*_no_mutation` guards, `install_default_loyalty_rule` and the
+  `*_insert_check` functions were all reachable by `anon` and `authenticated`. Calling one raises
+  `0A000` before its body runs, so this was never exploitable — but it was inconsistent with the
+  revoke discipline applied to `ledger_post_entry`, `inventory_move`, `notify_emit` and
+  `active_loyalty_rule_version`, and harmless surface is how surface accumulates.
+  `20260906210000_revoke_trigger_function_execute.sql` revokes it, and
+  `scripts/ci/validate-migrations.mjs` now fails the build if a future migration reintroduces it.
+  Case HD1 proves both halves: nothing returning `trigger` is executable by an API role, and the
+  notification emitter, the ledger append-only guard and the rule immutability guard all still fire.
 

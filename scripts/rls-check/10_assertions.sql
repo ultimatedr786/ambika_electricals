@@ -4321,3 +4321,58 @@ begin
     raise exception 'ASSERT: settings tables are directly writable';
   end if;
 end $$;
+
+-- CASE: HD1 hardening — trigger functions are not client-callable, yet still fire
+do $$
+declare v_n int; v_mem uuid; v_before int; v_after int;
+begin
+  execute 'reset role';
+
+  -- No API role holds EXECUTE on anything returning `trigger`.
+  select count(*) into v_n
+    from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+   where ns.nspname = 'public'
+     and p.prorettype = 'pg_catalog.trigger'::regtype
+     and (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+       or has_function_privilege('anon', p.oid, 'EXECUTE'));
+  if v_n <> 0 then
+    raise exception 'ASSERT: % trigger function(s) still callable by an API role', v_n;
+  end if;
+
+  -- The revoke must not have disarmed anything. Three different triggers,
+  -- all exercised as a signed-in user:
+  select id into v_mem from public.customer_memberships where membership_no = 'AE-DEVRAHUL1';
+  select count(*) into v_before from public.notifications;
+
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+
+  -- (a) the notification emitter on points_ledger
+  perform public.create_sale(
+    'bbbbbbbb-0000-4000-8000-000000000001',
+    '[{"name":"Hardening probe","qty":1,"unit_price_paise":40000}]'::jsonb,
+    '[{"method":"cash","amount_paise":40000}]'::jsonb,
+    v_mem, 0, 'hd1-key'
+  );
+  execute 'reset role';
+
+  select count(*) into v_after from public.notifications;
+  if v_after <= v_before then
+    raise exception 'ASSERT: the notification trigger stopped firing after the revoke';
+  end if;
+
+  -- (b) the append-only guard on points_ledger
+  begin
+    update public.points_ledger set points = 1 where source_type = 'sale';
+    raise exception 'ASSERT: the ledger immutability trigger stopped firing';
+  exception when sqlstate '22023' then null;
+     when insufficient_privilege then null;
+  end;
+
+  -- (c) the consistency guard on loyalty_rule_versions
+  begin
+    update public.loyalty_rule_versions set earn_points = 999 where version = 1;
+    raise exception 'ASSERT: the rule immutability trigger stopped firing';
+  exception when insufficient_privilege then null;
+  end;
+end $$;

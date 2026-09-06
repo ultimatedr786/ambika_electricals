@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(306);
+select plan(309);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -2383,6 +2383,33 @@ select ok(
   and not has_table_privilege('authenticated', 'public.catalogue_images', 'DELETE')
   and not has_table_privilege('authenticated', 'public.notification_preferences', 'INSERT'),
   'SET4: settings tables are RPC-write-only'
+);
+
+
+-- ---------------------------------------------------------------------------
+-- Hardening (20260906210000_revoke_trigger_function_execute.sql)
+-- ---------------------------------------------------------------------------
+select is(
+  (select count(*)::int
+     from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+    where ns.nspname = 'public'
+      and p.prorettype = 'pg_catalog.trigger'::regtype
+      and (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+        or has_function_privilege('anon', p.oid, 'EXECUTE'))),
+  0,
+  'HD1: no trigger function is EXECUTE-able by an API role'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'update public.points_ledger set points = 1 where source_type = ''sale'''),
+  '42501',
+  'HD1: the ledger append-only trigger still fires after the revoke'
+);
+select is(
+  extensions.sqlstate_as('postgres', null,
+    'update public.loyalty_rule_versions set earn_points = 999 where version = 1'),
+  '42501',
+  'HD1: the rule immutability trigger still fires after the revoke'
 );
 
 select * from finish();

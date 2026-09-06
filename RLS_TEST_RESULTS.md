@@ -750,3 +750,55 @@ genuine pgTAP extension instead of substituting stubs, and CI runs it that way
 against `supabase/postgres` — the same image the hosted platform runs, so
 `extensions.pgcrypto`, `pgtap` and our `search_path` assumptions are exercised
 for real. The stub mode remains for laptops without Docker.
+
+## Run 11 — Slice 10: trigger-function EXECUTE revoked (110 cases, 309 pgTAP)
+
+A gap I flagged in the handoff rather than fixing silently, then closed on
+request.
+
+PostgreSQL grants `EXECUTE` to `PUBLIC` on every new function. That made every
+trigger function in `public` — `notify_on_*`, `points_ledger_no_mutation`,
+`qr_attempts_no_mutation`, `install_default_loyalty_rule`, `sales_insert_check`,
+`points_ledger_insert_check`, `lrv_*`, `catalogue_image_consistency` — callable
+by `anon` and `authenticated`. Not exploitable: PostgreSQL raises
+`trigger functions can only be called as triggers` (0A000) before the body runs.
+But it was inconsistent with the explicit revokes on every other internal
+function, and "harmless surface" is how surface accumulates.
+
+`20260906210000_revoke_trigger_function_execute.sql` loops over
+`prorettype = 'trigger'::regtype` in `public` and revokes from
+`public, anon, authenticated`.
+
+### The two things worth proving
+
+**1. The validator rule actually bites.** Removing the migration and re-running
+`scripts/ci/validate-migrations.mjs`:
+
+```
+Schema validation FAILED — 14 problem(s):
+  • trigger function public.notify_on_rule_version is EXECUTE-able by an API role
+  • trigger function public.points_ledger_insert_check is EXECUTE-able by an API role
+  • trigger function public.points_ledger_no_mutation is EXECUTE-able by an API role
+  • trigger function public.qr_attempts_no_mutation is EXECUTE-able by an API role
+  • trigger function public.sales_insert_check is EXECUTE-able by an API role
+  …
+```
+
+A rule that has never failed is a rule nobody has tested.
+
+**2. Nothing was disarmed.** EXECUTE on a trigger function is checked at
+`CREATE TRIGGER` time, not each time it fires — but that is a claim, and the
+suites are the evidence. New case **HD1** asserts, as a signed-in user:
+
+- no function returning `trigger` is EXECUTE-able by `authenticated` or `anon`;
+- recording a sale still fires the notification emitter on `points_ledger`;
+- the ledger append-only guard still refuses an UPDATE;
+- the rule immutability guard still refuses an economics change.
+
+```
+110/110 RLS cases passed.
+pgTAP stub run: 309 ok, 0 not ok — PASSED
+```
+
+All 108 pre-existing cases — which exercise every trigger in the schema as
+`authenticated` — continued to pass unchanged, which is the broader proof.

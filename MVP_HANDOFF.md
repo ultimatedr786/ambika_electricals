@@ -6,7 +6,7 @@ instruction attached to it is *stop* — nothing on the deferred list has been
 started.
 
 **Branch:** `arena/01a07677-ambika-electricals`
-**Head:** `c041f9d` (7 commits on top of `854dcf2`)
+**Head:** `arena/01a07677-ambika-electricals` (9 commits on top of `854dcf2`)
 **Scope of the diff:** 80 files, +13,866 / −513
 
 > **This is not a launch.** The application runs in demo/mock fallback until the
@@ -32,7 +32,7 @@ started.
 
 ## 2. Database — migrations
 
-Twelve migrations, 7,943 lines, forward-only, applied in filename order. The
+Thirteen migrations, ~8,000 lines, forward-only, applied in filename order. The
 five in bold are new in this engagement.
 
 | Migration | What it establishes |
@@ -147,8 +147,8 @@ All re-run on `c041f9d` immediately before writing this.
 | TypeScript | `npm run typecheck` | **PASS**, 0 errors |
 | ESLint | `npm run lint` | **0 errors**, 55 warnings (pre-existing `react-hooks` advisories) |
 | Unit tests | `npm test` | **35/35** |
-| RLS policy harness | `npm run test:rls` | **109/109** |
-| pgTAP suite | `npm run test:pgtap` | **306/306** |
+| RLS policy harness | `npm run test:rls` | **110/110** |
+| pgTAP suite | `npm run test:pgtap` | **309/309** |
 | Schema validation | `node scripts/ci/validate-migrations.mjs` | **PASS** — 12 migrations, 30 tables, 65 definer functions |
 | Secret scan | `npm run scan:secrets` | **PASS** — 10 rules, no findings |
 | Production build | `npm run build` | **PASS** |
@@ -157,7 +157,7 @@ All re-run on `c041f9d` immediately before writing this.
 | Accessibility audit | `npm run audit:a11y` | **0 serious/critical** across all five critical flows |
 | Health endpoints | manual `curl` | `/api/health` 200 · `/api/ready` 200 `mode:demo` |
 
-Test-case growth in this engagement: RLS harness 78 → **109**, pgTAP 155 → **306**,
+Test-case growth in this engagement: RLS harness 78 → **110**, pgTAP 155 → **309**,
 unit 8 → **35**, plus 25 browser tests and the generated a11y report.
 
 Per-slice evidence with full logs is in `RLS_TEST_RESULTS.md` (Runs 6–10).
@@ -270,16 +270,20 @@ advanced analytics · multi-business selector · points-expiry cron.
 | Catalogue | Customer-facing product catalogue | Product images stay staff-side |
 | Settings | Tier configuration, campaign settings, per-store notification routing | §6 says build only the essential five |
 
-### One known, non-exploitable hardening item
+### The hardening item flagged at handoff — now closed
 
 PostgreSQL grants `EXECUTE` to `PUBLIC` by default, so trigger functions
-(`notify_on_*`, `lrv_*`, `*_no_mutation`, `install_default_loyalty_rule`, …)
-are technically callable by `authenticated`. Calling one directly raises
-`trigger functions can only be called as triggers`, so there is no exploit —
-but it is inconsistent with the revoke discipline applied elsewhere, and the CI
-validator does not currently check it. I have **not** fixed it, because doing so
-at handoff would be expanding scope after you asked me to stop. It is a
-one-line migration plus a validator rule whenever you want it.
+(`notify_on_*`, `*_no_mutation`, `install_default_loyalty_rule`, the
+`*_insert_check` guards) were callable by `anon` and `authenticated`. Never
+exploitable — calling one raises `0A000` before its body runs — but
+inconsistent with the revoke discipline applied everywhere else.
+
+`20260906210000_revoke_trigger_function_execute.sql` closes it, and
+`scripts/ci/validate-migrations.mjs` gained a rule so a future migration cannot
+reintroduce it. The rule was verified to actually bite: removing the migration
+makes the validator fail with a named list. Case **HD1** proves the triggers
+still fire afterwards — a revoke that quietly disarmed the append-only guards
+would have been far worse than the surface it removed.
 
 ---
 

@@ -148,6 +148,24 @@ await withClient(TEST_DB, async (c) => {
     `anon has table grants: ${anonGrants.map((r) => r.table_name).join(", ")}`
   );
 
+  // Trigger functions can never be usefully called directly (PostgreSQL
+  // raises 0A000), but PUBLIC gets EXECUTE on every new function by default.
+  // Leaving them callable is harmless surface, and harmless surface is how
+  // surface accumulates — so it is a build failure, not a style note.
+  const { rows: triggerFns } = await c.query(`
+    select p.proname
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.prorettype = 'pg_catalog.trigger'::regtype
+       and (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+         or has_function_privilege('anon', p.oid, 'EXECUTE'))
+     order by p.proname
+  `);
+  for (const t of triggerFns) {
+    check(false, `trigger function public.${t.proname} is EXECUTE-able by an API role`);
+  }
+
   // Every SECURITY DEFINER function must pin its search_path, or it can be
   // hijacked by a caller-controlled schema.
   const { rows: definers } = await c.query(`
@@ -164,7 +182,10 @@ await withClient(TEST_DB, async (c) => {
       `SECURITY DEFINER function public.${d.proname} does not set search_path`
     );
   }
-  console.log(`  checked ${tables.length} tables and ${definers.length} definer functions`);
+  console.log(
+    `  checked ${tables.length} tables, ${definers.length} definer functions ` +
+      `and every trigger function's grants`
+  );
 });
 
 await withClient("postgres", (c) => c.query(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`));
