@@ -5,7 +5,7 @@ import { EyeOff, QrCode, RefreshCw, ShieldCheck, TimerReset } from "lucide-react
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { QRCode } from "@/components/shared/qr-code";
+import { ScannableQR } from "@/components/shared/qr-code";
 import { isSupabaseConfigured } from "@/lib/auth/env";
 import { groupQrToken } from "@/lib/qr/token";
 import {
@@ -142,7 +142,7 @@ export function LiveMembershipQr() {
             <div className="flex flex-col items-center gap-3">
               <div className="rounded-2xl border bg-white p-3 shadow-sm">
                 <div className="size-48 sm:size-56">
-                  <QRCode value={issued.token} size={29} />
+                  <ScannableQR value={issued.token} />
                 </div>
               </div>
 
