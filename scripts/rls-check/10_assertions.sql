@@ -369,36 +369,61 @@ begin
   update public.profiles set display_name = 'Rahul Sharma' where id = '55555555-5555-4555-8555-555555555555';
 end $$;
 
--- CASE: W2 businesses — owner update OK; manager/staff/foreign-tenant denied
+-- CASE: W2 businesses — no direct writes for anyone; the RPC is the only path
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
 do $$
 declare v_n int;
 begin
-  update public.businesses set support_phone = '+91 98250 41299' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
-  get diagnostics v_n = row_count;
-  if v_n <> 1 then raise exception 'ASSERT: owner should update own business, affected %', v_n; end if;
+  -- Slice 9 revoked the direct UPDATE grant: it bypassed GSTIN/email
+  -- validation and the business.profile_updated audit entry, and an audit
+  -- trail with a legitimate bypass is not an audit trail.
+  begin
+    update public.businesses set support_phone = '+91 98250 41299'
+     where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+    raise exception 'ASSERT: owner still has a direct UPDATE path on businesses';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- …and the supported path works and is audited (covered in detail by SET1).
+  perform public.update_business_profile(null, null, null, null, '+91 98250 41299');
+  select count(*) into v_n from public.businesses
+   where id = 'aaaaaaaa-0000-4000-8000-000000000001' and support_phone = '+91 98250 41299';
+  if v_n <> 1 then raise exception 'ASSERT: update_business_profile did not apply'; end if;
 end $$;
 select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
 do $$
-declare v_n int;
 begin
-  update public.businesses set name = 'Manager Takeover' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
-  get diagnostics v_n = row_count;
-  if v_n <> 0 then raise exception 'ASSERT: manager updated business settings'; end if;
+  -- Now refused by the grant, not merely filtered to zero rows by RLS.
+  begin
+    update public.businesses set name = 'Manager Takeover'
+     where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+    raise exception 'ASSERT: manager updated business settings';
+  exception when insufficient_privilege then null;
+  end;
+  -- The RPC refuses them too, for the same reason.
+  begin
+    perform public.update_business_profile('Manager Takeover');
+    raise exception 'ASSERT: manager renamed the business through the RPC';
+  exception when insufficient_privilege then null;
+  end;
 end $$;
 select set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
 do $$
-declare v_n int;
 begin
-  update public.businesses set name = 'Volt Takeover' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
-  get diagnostics v_n = row_count;
-  if v_n <> 0 then raise exception 'ASSERT: foreign owner updated Ambika business'; end if;
+  begin
+    update public.businesses set name = 'Volt Takeover'
+     where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+    raise exception 'ASSERT: foreign owner updated Ambika business';
+  exception when insufficient_privilege then null;
+  end;
 end $$;
 reset role;
 do $$
 begin
-  update public.businesses set support_phone = '+91 98250 41200' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  -- Restore the seeded phone as the maintenance role for later cases.
+  update public.businesses set support_phone = '+91 98250 41200'
+   where id = 'aaaaaaaa-0000-4000-8000-000000000001';
 end $$;
 
 -- CASE: W3 businesses — direct INSERT denied for every signed-in role
@@ -414,23 +439,41 @@ begin
 end $$;
 reset role;
 
--- CASE: W4 stores — owner insert/update OK; staff+manager insert denied; staff update denied
+-- CASE: W4 stores — no direct writes; upsert_store is the only path, and it
+-- closes rather than deletes
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"88888888-8888-4888-8888-888888888888","role":"authenticated"}', true);
 do $$
-declare v_n int; v_id uuid;
+declare v_n int; v_id uuid; v_res jsonb;
 begin
-  insert into public.stores (business_id, name, city)
-  values ('aaaaaaaa-0000-4000-8000-000000000001', 'W4 Test Store', 'Surat')
-  returning id into v_id;
-  if v_id is null then raise exception 'ASSERT: owner store insert failed'; end if;
-  update public.stores set city = 'Surat City' where id = v_id;
-  get diagnostics v_n = row_count;
-  if v_n <> 1 then raise exception 'ASSERT: owner store update failed'; end if;
-  delete from public.stores where id = v_id;  -- owner has no DELETE grant → should fail
-  raise exception 'ASSERT: store DELETE should be denied (soft-close only)';
-exception when insufficient_privilege then
-  null; -- expected: DELETE denied — cleanup happens as postgres after reset role
+  -- Direct INSERT/UPDATE were revoked in Slice 9 (they skipped the
+  -- store.created / store.updated audit entries).
+  begin
+    insert into public.stores (business_id, name, city)
+    values ('aaaaaaaa-0000-4000-8000-000000000001', 'W4 Test Store', 'Surat');
+    raise exception 'ASSERT: owner still has a direct INSERT path on stores';
+  exception when insufficient_privilege then null;
+  end;
+
+  select public.upsert_store(null, 'W4 Test Store', null, null, null, true, 'Surat') into v_res;
+  v_id := (v_res ->> 'store_id')::uuid;
+  if v_id is null then raise exception 'ASSERT: upsert_store did not create a store'; end if;
+
+  begin
+    update public.stores set city = 'Surat City' where id = v_id;
+    raise exception 'ASSERT: owner still has a direct UPDATE path on stores';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Closing is a status flip; DELETE is granted to nobody.
+  perform public.upsert_store(v_id, null, null, null, null, false);
+  select count(*) into v_n from public.stores where id = v_id and is_active = false;
+  if v_n <> 1 then raise exception 'ASSERT: store was not closed'; end if;
+  begin
+    delete from public.stores where id = v_id;
+    raise exception 'ASSERT: store DELETE should be denied (soft-close only)';
+  exception when insufficient_privilege then null;
+  end;
 end $$;
 reset role;
 delete from public.stores where name = 'W4 Test Store';
@@ -444,9 +487,14 @@ begin
     raise exception 'ASSERT: staff store INSERT was permitted';
   exception when insufficient_privilege then null;
   end;
-  update public.stores set name = 'Renamed By Staff' where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
-  get diagnostics v_n = row_count;
-  if v_n <> 0 then raise exception 'ASSERT: staff updated a store'; end if;
+  begin
+    update public.stores set name = 'Renamed By Staff'
+     where business_id = 'aaaaaaaa-0000-4000-8000-000000000001';
+    raise exception 'ASSERT: staff updated a store';
+  exception when insufficient_privilege then null;
+  end;
+  -- v_n is unused now that both paths raise; keep the declaration honest.
+  v_n := 0;
 end $$;
 select set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
 do $$
@@ -4143,11 +4191,13 @@ begin
   if v_name <> 'Ambika Electricals & Sons' then
     raise exception 'ASSERT: business name not updated (%)', v_name;
   end if;
+  -- At least one: W2 also exercises the RPC (phone), so the exact count is
+  -- not the property under test — capturing the previous value is.
   select count(*) into v_n from public.audit_logs
    where action = 'business.profile_updated'
      and business_id = 'aaaaaaaa-0000-4000-8000-000000000001'
      and metadata -> 'from' ->> 'name' = 'Ambika Electricals';
-  if v_n <> 1 then raise exception 'ASSERT: profile change not audited with the previous value'; end if;
+  if v_n < 1 then raise exception 'ASSERT: profile change not audited with the previous value'; end if;
 end $$;
 
 -- CASE: SET2 stores — owner-only upsert, close instead of delete, tenant-safe

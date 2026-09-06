@@ -691,3 +691,62 @@ The `storage` schema exists on Supabase but not on the bare PostgreSQL the local
 the bucket and policy block is wrapped in a guarded `DO` that emits a notice and returns. The
 migration therefore applies identically to both, and the bucket policies are exercised on staging
 rather than here — called out in the owner checklist rather than silently assumed.
+
+## Run 10 — Step 3 Slice 9: schema invariants in CI (109 cases, 306 pgTAP)
+
+The database work in this slice was not a feature; it was a finding.
+
+`scripts/ci/validate-migrations.mjs` — new in the CI slice — applies every
+migration to an empty database and then asserts invariants that a syntactically
+valid migration set can still violate. On its first run it failed:
+
+```
+Schema validation FAILED — 1 problem(s):
+
+  • public.businesses grants UPDATE to an API role — writes should go through an RPC
+```
+
+`businesses.UPDATE` and (after tightening the allow-list) `stores.INSERT/UPDATE`
+had been granted since the original RLS migration. The owner-only policies meant
+neither was a privilege-escalation hole — but once `update_business_profile` and
+`upsert_store` existed, both were a way for an owner to change tenant
+configuration **without leaving an audit entry**, and without the GSTIN/email
+validation. No application code used either path (every `from("businesses")` and
+`from("stores")` call in `src/` is a SELECT), so
+`20260906200000_tighten_settings_grants.sql` revokes them outright.
+
+Two existing cases encoded the old contract and had to be rewritten rather than
+deleted — they now assert the *new* one:
+
+- **W2** — nobody has a direct UPDATE path on `businesses`; a manager is refused
+  by both the grant and the RPC; the owner's change goes through
+  `update_business_profile` and is audited.
+- **W4** — nobody writes `stores` directly; `upsert_store` creates, closing is a
+  status flip, and DELETE is granted to nobody.
+
+```
+109/109 RLS cases passed.
+pgTAP stub run: 306 ok, 0 not ok — PASSED
+```
+
+### Invariants now enforced on every CI run
+
+1. Migration filenames are `<14-digit timestamp>_<snake_case>.sql`, with no
+   duplicate timestamps (duplicates make apply order undefined).
+2. Every `public` table has row level security enabled.
+3. No API role holds INSERT/UPDATE/DELETE outside a three-table allow-list.
+4. `anon` holds no table grants at all.
+5. Every `SECURITY DEFINER` function pins `search_path`.
+
+Invariant 5 is worth keeping even though all 65 definer functions already
+comply: it is the difference between "we remembered every time so far" and
+"forgetting is a build failure".
+
+### Real pgTAP, not only the stubs
+
+§7 says the local stub runner must not be the only source of launch confidence.
+`scripts/rls-check/pgtap-run.mjs` now takes `PGTAP_REAL=1`, which installs the
+genuine pgTAP extension instead of substituting stubs, and CI runs it that way
+against `supabase/postgres` — the same image the hosted platform runs, so
+`extensions.pgcrypto`, `pgtap` and our `search_path` assumptions are exercised
+for real. The stub mode remains for laptops without Docker.

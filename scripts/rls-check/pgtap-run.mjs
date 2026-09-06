@@ -1,21 +1,43 @@
-// Local approximation runner for supabase/tests/rls_policy_tests.sql.
+// Runner for supabase/tests/rls_policy_tests.sql.
 //
-// The CANONICAL runner is `supabase test db` (real pgTAP, needs Docker). Where
-// Docker is unavailable this script executes the same test file against the
-// throwaway harness database (stubs → migrations → seed) with minimal stubs
-// for the pgTAP subset the file uses (plan/is/ok/matches/lives_ok/throws_ok/finish).
-// Stub semantics: is() compares ::text with IS NOT DISTINCT FROM; failures are
-// reported as `not ok N` WARNING lines; finish() raises when run<>plan or any
-// failure occurred. Usage: node scripts/rls-check/pgtap-run.mjs
+// TWO MODES, and the difference matters:
+//
+//   PGTAP_REAL=1 → installs the REAL pgTAP extension and runs the file against
+//                  it. This is what CI uses (see .github/workflows/ci.yml); it
+//                  is the only mode that proves the file works with genuine
+//                  pgTAP semantics rather than our approximation of them.
+//
+//   default      → substitutes minimal stubs for the pgTAP subset the file
+//                  uses (plan/is/ok/matches/lives_ok/throws_ok/finish), so the
+//                  suite can still run where pgTAP/Docker is unavailable.
+//                  Stub semantics: is() compares ::text with IS NOT DISTINCT
+//                  FROM; failures surface as `not ok N` WARNING lines; finish()
+//                  raises when run<>plan or anything failed.
+//
+// Connection comes from PGHOST/PGPORT/PGUSER/PGPASSWORD (same as run.mjs), so
+// the same script works against the local embedded server and a CI service
+// container.
+//
+// Usage: node scripts/rls-check/pgtap-run.mjs
+//        PGTAP_REAL=1 PGPORT=5432 node scripts/rls-check/pgtap-run.mjs
 //
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 
-const repoRoot = "/home/user/ambika_electricals";
-const ADMIN_URL = "postgres://postgres:postgres@127.0.0.1:54329/postgres";
-const TEST_DB = process.env.RLS_DB_NAME || "pgtap_local";
-const adminUrlFor = (db) => `postgres://postgres:postgres@127.0.0.1:54329/${db}`;
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const REAL_PGTAP = process.env.PGTAP_REAL === "1";
+const TEST_DB = process.env.RLS_DB_NAME || (REAL_PGTAP ? "pgtap_ci" : "pgtap_local");
+
+const PG = {
+  host: process.env.PGHOST || "127.0.0.1",
+  port: process.env.PGPORT || "54329",
+  user: process.env.PGUSER || "postgres",
+  password: process.env.PGPASSWORD || "postgres",
+};
+const adminUrlFor = (db) =>
+  `postgres://${PG.user}:${encodeURIComponent(PG.password)}@${PG.host}:${PG.port}/${db}`;
 
 const ALL_NOTICES = [];
 async function query(url, sql) {
@@ -128,19 +150,38 @@ end $$;
 let tap = readFileSync(join(repoRoot, "supabase/tests/rls_policy_tests.sql"), "utf8");
 const createExt = "create extension if not exists pgtap with schema extensions;";
 if (!tap.includes(createExt)) throw new Error("create-extension line not found");
-tap = tap.replace(createExt, () => STUBS);  // fn form: $$ must not be unescaped
+if (!REAL_PGTAP) {
+  tap = tap.replace(createExt, () => STUBS); // fn form: $$ must not be unescaped
+}
+
+const mode = REAL_PGTAP ? "REAL pgTAP" : "stub";
 
 try {
-  await query(testUrl, tap);
+  const { res } = await query(testUrl, tap);
+  if (REAL_PGTAP) {
+    // Real pgTAP returns TAP lines as rows; a failure is any line starting
+    // "not ok". finish() does not raise, so we inspect the output ourselves.
+    const sets = Array.isArray(res) ? res : [res];
+    const lines = sets.flatMap((r) => (r?.rows ?? []).map((row) => Object.values(row)[0]));
+    const failures = lines.filter((l) => typeof l === "string" && l.startsWith("not ok"));
+    const oks = lines.filter((l) => typeof l === "string" && /^ok \d+/.test(l)).length;
+    for (const f of failures) console.error(f);
+    if (failures.length > 0) {
+      console.error(`\npgTAP ${mode} run: ${oks} ok, ${failures.length} not ok — FAILED`);
+      process.exit(1);
+    }
+    console.log(`\npgTAP ${mode} run: ${oks} ok, 0 not ok — PASSED`);
+    process.exit(0);
+  }
   const oks = ALL_NOTICES.filter(n => /^ok \d+/.test(n)).length;
-  console.log(`\npgTAP stub run: ${oks} ok, 0 not ok — PASSED`);
+  console.log(`\npgTAP ${mode} run: ${oks} ok, 0 not ok — PASSED`);
   process.exit(0);
 } catch (err) {
   const client = new pg.Client({ connectionString: testUrl });
   await client.connect();
   const q = async (sql) => (await client.query(sql)).rows;
   // rerun capturing warnings for detail: replay is not possible; rely on err + first pass notices
-  console.error("\npgTAP stub run FAILED:", err.message.split("\n")[0]);
+  console.error(`\npgTAP ${mode} run FAILED:`, err.message.split("\n")[0]);
   for (const n of ALL_NOTICES.filter(m => m.startsWith("not ok"))) console.error(n);
   if (err.where) console.error("WHERE:", err.where.split("\n").slice(0,3).join(" | "));
   if (err.position) {

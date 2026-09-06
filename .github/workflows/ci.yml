@@ -1,0 +1,201 @@
+name: CI
+
+# Release-quality checks for Rewardly (FINAL_MVP_LAUNCH_COMPLETION.md §7).
+#
+# Four independent jobs so a failure names its own cause:
+#
+#   quality   typecheck, lint, unit tests, production build, route smoke
+#   database  migrations applied to a REAL PostgreSQL, RLS harness + real pgTAP
+#   ui        the MVP UI acceptance gate in a real browser, desktop and mobile
+#   security  repository secret scan + dependency audit
+#
+# `database` deliberately uses the same PostgreSQL image Supabase runs, so the
+# extensions the migrations depend on (pgcrypto in `extensions`, pgtap) are the
+# real ones rather than local approximations — §7 is explicit that the local
+# stub runner must not be the only source of launch confidence.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the previous run irrelevant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  quality:
+    name: Types, lint, tests, build, smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        # No Supabase env is provided on purpose: the build must succeed in the
+        # demo/mock fallback configuration, which is how a fresh clone runs.
+        run: npm run build
+
+      - name: Start the production server
+        run: |
+          npm start &
+          echo "$!" > .server.pid
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:3000/login; then
+              echo "server up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become ready"; exit 1
+
+      - name: Route smoke checks
+        run: npm run smoke
+        env:
+          BASE_URL: http://127.0.0.1:3000
+
+      - name: Stop the server
+        if: always()
+        run: '[ -f .server.pid ] && kill "$(cat .server.pid)" || true'
+
+  database:
+    name: Migrations + RLS + real pgTAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        # The image Supabase itself runs, so `extensions.pgcrypto`, `pgtap` and
+        # the search_path assumptions in our migrations are exercised for real.
+        # Bump deliberately: a Postgres major change is a migration event.
+        image: supabase/postgres:15.8.1.060
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Migration and schema validation
+        # Applying every migration in order to an empty database is the schema
+        # validation: ordering mistakes, missing dependencies and syntax errors
+        # all fail here, before any test runs.
+        run: node scripts/ci/validate-migrations.mjs
+
+      - name: RLS policy harness
+        run: npm run test:rls
+
+      - name: pgTAP suite (real extension, not the local stubs)
+        run: npm run test:pgtap
+        env:
+          PGTAP_REAL: "1"
+
+  ui:
+    name: MVP UI acceptance gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: UI gate (desktop light/dark + mobile)
+        # playwright.config.ts starts and stops the app itself.
+        run: npm run test:ui
+
+      - name: Upload the report when the gate fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  security:
+    name: Secrets and dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the scan sees what a PR actually adds.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Secret scan
+        # Self-contained and offline: no third-party action, no licence gate,
+        # identical locally and here. GitHub's own secret scanning and push
+        # protection should ALSO be enabled by the owner — see OPERATIONS.md.
+        run: node scripts/ci/scan-secrets.mjs
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Dependency audit
+        # Fails on high/critical only: moderate advisories in dev-only tooling
+        # should not block a hotfix at the counter.
+        run: npm audit --audit-level=high --omit=dev
+
+      - name: Dependency review (pull requests)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

@@ -10,7 +10,11 @@
     --card-foreground: 222 32% 12%;
     --popover: 0 0% 100%;
     --popover-foreground: 222 32% 12%;
-    --primary: 218 92% 55%;
+    /* Lightness lowered 55% → 46% so primary text clears WCAG AA (4.5:1) on
+       white AND on the bg-primary/10 tint, and white clears it on primary.
+       Hue and saturation are unchanged, so the brand still reads the same.
+       Measured by scripts/audit/a11y-perf.mjs — see PERFORMANCE_A11Y_AUDIT.md. */
+    --primary: 218 92% 46%;
     --primary-foreground: 0 0% 100%;
     --secondary: 214 32% 96%;
     --secondary-foreground: 222 32% 16%;
@@ -20,9 +24,15 @@
     --accent-foreground: 218 82% 34%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --success: 152 62% 36%;
+    /* 36% → 30%: the "+12 pts" figures beside every product were 3.79:1 on
+       white, and those numbers are the whole point of the screen. */
+    --success: 152 62% 30%;
     --success-foreground: 0 0% 100%;
-    --warning: 38 92% 50%;
+    /* 50% → 30%. Amber-on-white is the worst offender in any palette: the
+       original was 2.13:1, so "Only 9 left" and "550 more points needed" were
+       effectively unreadable for low-vision users. Badge tints need the same
+       margin, hence 30% rather than the 32% that just scrapes white. */
+    --warning: 38 92% 30%;
     --warning-foreground: 30 60% 12%;
     --border: 214 24% 90%;
     --input: 214 24% 89%;

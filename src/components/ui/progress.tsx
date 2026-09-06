@@ -10,6 +10,12 @@ const Progress = React.forwardRef<
   <ProgressPrimitive.Root
     ref={ref}
     className={cn("relative h-2 w-full overflow-hidden rounded-full bg-secondary", className)}
+    // role="progressbar" without a name is announced as an anonymous
+    // percentage. Callers should pass something specific; this is the floor,
+    // not an excuse to skip it (WCAG 4.1.2, axe `aria-progressbar-name`).
+    aria-label={props["aria-label"] ?? (props["aria-labelledby"] ? undefined : "Progress")}
+    aria-valuetext={props["aria-valuetext"] ?? (value == null ? undefined : `${Math.round(value)}%`)}
+    value={value}
     {...props}
   >
     <ProgressPrimitive.Indicator

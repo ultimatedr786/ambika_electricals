@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(303);
+select plan(306);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -225,13 +225,26 @@ select is(
   'W1: status column is not user-updatable'
 );
 
-select perform_as('authenticated', '22222222-2222-4222-8222-222222222222',
-  'update public.businesses set name = ''Manager Takeover'' where id = ''aaaaaaaa-0000-4000-8000-000000000001'''
+-- Slice 9 revoked the direct UPDATE grant on businesses (it bypassed the
+-- validation and the audit entry), so this is now a hard denial rather than
+-- an RLS filter that quietly matches nothing.
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'update public.businesses set name = ''Manager Takeover''
+      where id = ''aaaaaaaa-0000-4000-8000-000000000001'''),
+  '42501',
+  'W2: nobody has a direct UPDATE path on businesses'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    'select public.update_business_profile(''Manager Takeover'')'),
+  '42501',
+  'W2: a manager cannot change business settings through the RPC either'
 );
 select is(
   (select name from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000001'),
   'Ambika Electricals',
-  'W2: manager cannot change business settings'
+  'W2: the business name is unchanged'
 );
 
 select is(
@@ -239,6 +252,12 @@ select is(
     'insert into public.stores (business_id, name) values (''aaaaaaaa-0000-4000-8000-000000000001'', ''Rogue Store'')'),
   '42501',
   'W4: staff cannot create stores'
+);
+select is(
+  extensions.sqlstate_as('authenticated', '88888888-8888-4888-8888-888888888888',
+    'insert into public.stores (business_id, name) values (''aaaaaaaa-0000-4000-8000-000000000001'', ''Direct Store'')'),
+  '42501',
+  'W4: not even the owner writes stores directly — upsert_store is the path'
 );
 
 select perform_as('authenticated', '33333333-3333-4333-8333-333333333333',
@@ -269,13 +288,14 @@ select is(
   'W7: direct audit INSERT denied'
 );
 
+-- The supported path: the RPC validates, audits, and is owner-only.
 select perform_as('authenticated', '88888888-8888-4888-8888-888888888888',
-  'update public.businesses set name = ''Owner Edit'' where id = ''aaaaaaaa-0000-4000-8000-000000000001'''
+  'select public.update_business_profile(''Owner Edit'')'
 );
 select is(
   (select name from public.businesses where id = 'aaaaaaaa-0000-4000-8000-000000000001'),
   'Owner Edit',
-  'W2: owner updates their own business'
+  'W2: the owner updates their own business through update_business_profile'
 );
 update public.businesses set name = 'Ambika Electricals' where id = 'aaaaaaaa-0000-4000-8000-000000000001';
 update public.profiles set display_name = 'Rahul Sharma' where id = '55555555-5555-4555-8555-555555555555';
@@ -2268,11 +2288,10 @@ select is(
   'Ambika Electricals & Sons',
   'SET1: the new name is stored'
 );
-select is(
+select ok(
   (select count(*) from public.audit_logs
     where action = 'business.profile_updated'
-      and metadata -> 'from' ->> 'name' = 'Ambika Electricals')::int,
-  1,
+      and metadata -> 'from' ->> 'name' = 'Ambika Electricals') >= 1,
   'SET1: the change is audited with the previous value'
 );
 

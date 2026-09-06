@@ -272,7 +272,8 @@ export default function NewSalePage() {
                   <Button size="lg" className="h-auto flex-col gap-1.5 py-4" onClick={() => setScannerOpen(true)}>
                     <QrCode className="!size-5" aria-hidden />
                     <span>Scan Customer QR</span>
-                    <span className="text-[11px] font-normal opacity-80">Fastest way at the counter</span>
+                    {/* opacity-80 on primary dropped white to 4.37:1 — below AA for 11px text. */}
+                    <span className="text-[11px] font-normal opacity-95">Fastest way at the counter</span>
                   </Button>
                   <Button size="lg" variant="outline" className="h-auto flex-col gap-1.5 py-4" onClick={() => setSelectorOpen(true)}>
                     <Search className="!size-5" aria-hidden />

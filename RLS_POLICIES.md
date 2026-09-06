@@ -72,9 +72,13 @@ supply (proven by tests A3/A6/A7).
 
 ## 3. Grant floor (belt & braces under the policies)
 
-`authenticated` receives only: SELECT on all tables (+ the narrow `profiles` column-update grant),
-INSERT/UPDATE on `stores` and `customer_memberships` — both row-gated by owner/manager(+staff)
-policies. `points_ledger` and `customer_points_balance` are SELECT-only at grant level; every
+`authenticated` receives only: SELECT on all tables (+ the narrow `profiles` column-update grant)
+and INSERT/UPDATE on `customer_memberships` (counter enrolment, row-gated by the staff policy).
+**`businesses.UPDATE` and `stores.INSERT/UPDATE` were revoked in
+`20260906200000_tighten_settings_grants.sql`** — once `update_business_profile` and `upsert_store`
+existed, the direct paths were a way to change tenant configuration without leaving an audit entry,
+and an audit trail with a legitimate bypass is not an audit trail. This was found by
+`scripts/ci/validate-migrations.mjs`, not by a human reading the grants. `points_ledger` and `customer_points_balance` are SELECT-only at grant level; every
 write path is an RPC. No DELETE grants exist anywhere. `anon` receives nothing; new tables default to
 no-grant (`ALTER DEFAULT PRIVILEGES … REVOKE`). `service_role` retains full access for trusted
 server operations and **must never appear in a browser bundle** (enforced by `server-only` imports
@@ -267,11 +271,11 @@ the real migrations + seed; see `RLS_TEST_RESULTS.md` for all logs):
   `security` and unknown categories, reject outsiders and replace rather than duplicate. `anon` can
   call none of it.
 
-`supabase/tests/rls_policy_tests.sql` (pgTAP, 303 assertions) mirrors the same matrix for
+`supabase/tests/rls_policy_tests.sql` (pgTAP, 306 assertions) mirrors the same matrix for
 `supabase test db` on the CLI stack. Docker is unavailable in the build sandbox, so the file was
 additionally executed via `node scripts/rls-check/pgtap-run.mjs` — the same test file against the
 harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/lives_ok/throws_ok/finish):
-**303/303 passed** (2026-09-06). An earlier run also surfaced a pre-existing off-by-two `plan()` count
+**306/306 passed** (2026-09-06). CI additionally runs this file against the **real pgTAP extension** on the PostgreSQL image Supabase ships, so the stub runner is no longer the only evidence. An earlier run also surfaced a pre-existing off-by-two `plan()` count
 (the earlier series actually execute 109 assertions, not the declared 107) — now corrected.
 
 ## 6. Deliberate decisions / future slices

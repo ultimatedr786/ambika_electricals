@@ -44,3 +44,6 @@ next-env.d.ts
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# local throwaway test database (scripts/dev/start-test-db.mjs)
+/.tmp-testdb/

@@ -15,7 +15,11 @@
     "smoke": "node scripts/smoke-routes.mjs",
     "test:rls": "node scripts/rls-check/run.mjs",
     "test:ui": "playwright test",
-    "test:ui:report": "playwright show-report"
+    "test:ui:report": "playwright show-report",
+    "db:start": "node scripts/dev/start-test-db.mjs",
+    "test:pgtap": "node scripts/rls-check/pgtap-run.mjs",
+    "scan:secrets": "node scripts/ci/scan-secrets.mjs",
+    "audit:a11y": "node scripts/audit/a11y-perf.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",
@@ -68,6 +72,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/three": "^0.166.0",
+    "axe-core": "^4.13.0",
+    "embedded-postgres": "^18.4.0-beta.17",
     "eslint": "^9.39.5",
     "eslint-config-next": "16.3.4",
     "jsqr": "^1.4.0",
