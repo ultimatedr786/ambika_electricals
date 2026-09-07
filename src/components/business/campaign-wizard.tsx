@@ -15,6 +15,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
+import { isSupabaseConfigured } from "@/lib/auth/env";
+import { useLiveCampaigns } from "@/lib/campaigns/use-live-campaigns";
 import { cn, formatNumber, sleep } from "@/lib/utils";
 
 const steps = ["Goal", "Audience", "Reward", "Schedule", "Review"] as const;
@@ -84,6 +86,8 @@ const addDays = (days: number) => {
 export function CampaignWizard({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const { state } = useStore();
   const { campaignService } = useServices();
+  const configured = isSupabaseConfigured();
+  const live = useLiveCampaigns();
   const [step, setStep] = React.useState(0);
   const [saving, setSaving] = React.useState(false);
   const [aiOpen, setAiOpen] = React.useState(false);
@@ -105,7 +109,7 @@ export function CampaignWizard({ open, onOpenChange }: { open: boolean; onOpenCh
   }, [open]);
 
   const estimatedReach = React.useMemo(() => {
-    const total = state.customers.length * 240;
+    const total = configured ? live.activeMembers : state.customers.length * 240;
     const factor =
       audience === "All members" ? 1
         : audience.startsWith("Gold") ? 0.28
@@ -115,7 +119,7 @@ export function CampaignWizard({ open, onOpenChange }: { open: boolean; onOpenCh
         : audience.startsWith("Electricians") ? 0.22
         : 0.12;
     return Math.round(total * factor);
-  }, [audience, state.customers.length]);
+  }, [audience, configured, live.activeMembers, state.customers.length]);
 
   const canContinue = step === 0 ? name.trim().length >= 3 : true;
 
@@ -130,12 +134,26 @@ export function CampaignWizard({ open, onOpenChange }: { open: boolean; onOpenCh
 
   const launch = async (status: "Active" | "Draft") => {
     setSaving(true);
-    await campaignService.createCampaign({ name, description, status, audience, reward, startDate, endDate });
-    setSaving(false);
-    onOpenChange(false);
-    toast.success(status === "Active" ? "Campaign launched" : "Draft saved", {
-      description: status === "Active" ? `${name} is now live for ${formatNumber(estimatedReach)} members.` : `${name} saved as a draft.`,
-    });
+    try {
+      if (configured) {
+        await live.create({
+          name, description, audience, reward,
+          status: status === "Active" ? "active" : "draft",
+          startsAt: new Date(startDate).toISOString(),
+          endsAt: new Date(endDate).toISOString(),
+        });
+      } else {
+        await campaignService.createCampaign({ name, description, status, audience, reward, startDate, endDate });
+      }
+      onOpenChange(false);
+      toast.success(status === "Active" ? "Campaign launched" : "Draft saved", {
+        description: status === "Active" ? `${name} is now live for ${formatNumber(estimatedReach)} members.` : `${name} saved as a draft.`,
+      });
+    } catch (err) {
+      toast.error("Couldn't save the campaign", { description: err instanceof Error ? err.message : "Please try again." });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (

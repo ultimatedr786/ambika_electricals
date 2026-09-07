@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Copy, Gift, Sparkles } from "lucide-react";
+import { Copy, Gift, Heart, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +12,7 @@ import { FormDialog } from "@/components/shared/form-dialog";
 import { ProductArt, type ProductArtKey } from "@/components/shared/product-art";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/auth/env";
-import { formatDate, formatINR, formatNumber } from "@/lib/utils";
+import { cn, formatDate, formatINR, formatNumber } from "@/lib/utils";
 import { redeemMyRewardAction, type CustomerRedeemOutcome } from "@/app/customer/redemptions/redemptions-actions";
 
 /**
@@ -70,6 +70,31 @@ export function LiveRewardsStore() {
   const [redeeming, setRedeeming] = React.useState<LiveStoreReward | null>(null);
   const [issued, setIssued] = React.useState<CustomerRedeemOutcome | null>(null);
   const [reloadToken, setReloadToken] = React.useState(0);
+  const [wished, setWished] = React.useState<Set<string>>(new Set());
+  const [profileId, setProfileId] = React.useState<string | null>(null);
+
+  const toggleWishlist = React.useCallback(
+    async (reward: LiveStoreReward) => {
+      if (!supabase || !profileId) return;
+      const isWished = wished.has(reward.id);
+      setWished((s) => {
+        const next = new Set(s);
+        if (isWished) next.delete(reward.id);
+        else next.add(reward.id);
+        return next;
+      });
+      if (isWished) {
+        const { error } = await supabase.rpc("remove_from_wishlist", { p_reward_id: reward.id });
+        if (error) { setWished((s) => new Set(s).add(reward.id)); return; }
+        toast.success("Removed from wishlist");
+      } else {
+        const { error } = await supabase.rpc("add_to_wishlist", { p_business_id: reward.businessId, p_reward_id: reward.id });
+        if (error) { setWished((s) => { const n = new Set(s); n.delete(reward.id); return n; }); return; }
+        toast.success("Saved to wishlist");
+      }
+    },
+    [supabase, profileId, wished]
+  );
 
   const reload = React.useCallback(async () => {
     if (!configured || !supabase) {
@@ -82,13 +107,18 @@ export function LiveRewardsStore() {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
+      setProfileId(user.id);
 
       // Only rows linked to this exact profile (RLS self-query scoping).
-      const { data: memRes } = await supabase
-        .from("customer_memberships")
-        .select("id, business_id")
-        .eq("profile_id", user.id)
-        .eq("status", "active");
+      const [{ data: memRes }, { data: wishRes }] = await Promise.all([
+        supabase
+          .from("customer_memberships")
+          .select("id, business_id")
+          .eq("profile_id", user.id)
+          .eq("status", "active"),
+        supabase.from("wishlist_items").select("reward_id").eq("profile_id", user.id),
+      ]);
+      setWished(new Set(((wishRes ?? []) as { reward_id: string }[]).map((w) => w.reward_id)));
       const mems = (memRes ?? []) as { id: string; business_id: string }[];
       if (mems.length === 0) {
         setBusinesses([]);
@@ -194,12 +224,7 @@ export function LiveRewardsStore() {
                 <Sparkles className="size-4.5" aria-hidden />
               </span>
               <div className="min-w-0 flex-1">
-                <h2 className="flex flex-wrap items-center gap-2 text-sm font-semibold">
-                  Live rewards — {b.businessName}
-                  <Badge variant="outline" className="gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                    <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden /> Supabase
-                  </Badge>
-                </h2>
+                <h2 className="text-sm font-semibold">{b.businessName}</h2>
                 <p className="text-xs text-muted-foreground tabular">
                   Your balance: <span className="font-semibold text-foreground">{formatNumber(b.balance)} pts</span>
                   {" "}≈ {formatINR((b.balance * b.pointValuePaise) / 100)} · 1 pt ={" "}
@@ -215,9 +240,19 @@ export function LiveRewardsStore() {
             <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-4">
               {b.rewards.map((r) => {
                 const affordable = b.balance >= r.pointsCost;
+                const isWished = wished.has(r.id);
                 return (
-                  <Card key={r.id} className="flex h-full flex-col p-3.5">
-                    <div className="flex items-start gap-2.5">
+                  <Card key={r.id} className="relative flex h-full flex-col p-3.5">
+                    <button
+                      type="button"
+                      onClick={() => void toggleWishlist(r)}
+                      aria-label={isWished ? "Remove from wishlist" : "Add to wishlist"}
+                      aria-pressed={isWished}
+                      className="absolute right-2 top-2 flex size-7 items-center justify-center rounded-full bg-background/85 shadow-sm backdrop-blur transition-transform active:scale-90"
+                    >
+                      <Heart className={cn("size-3.5 transition-colors", isWished ? "fill-destructive text-destructive" : "text-muted-foreground")} />
+                    </button>
+                    <div className="flex items-start gap-2.5 pr-7">
                       <ProductArt art={(r.artKey ?? "gift") as ProductArtKey} className="size-12 shrink-0" tone="muted" />
                       <div className="min-w-0">
                         <p className="text-sm font-medium leading-snug">{r.name}</p>

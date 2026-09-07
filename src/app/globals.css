@@ -43,12 +43,14 @@
        (see src/hooks/use-sidebar.ts). Only consumed at the `lg` breakpoint. */
     --sidebar-w: 248px;
 
-    /* Scrollbar system — quiet neutral, brand-consistent */
-    --scrollbar-size: 11px;
-    --scrollbar-track: 214 32% 96%;
-    --scrollbar-thumb: 216 16% 78%;
-    --scrollbar-thumb-hover: 216 16% 64%;
-    --scrollbar-thumb-active: 218 40% 48%;
+    /* Scrollbar system — thin, overlay-style: near-invisible at rest, fades
+       in on hover/scroll. Derived from --foreground at low opacity (not a
+       separate gray) so it self-adjusts to light/dark and to any surface a
+       scroll region sits on, never fighting the container's own background. */
+    --scrollbar-size: 8px;
+    --scrollbar-thumb-resting-opacity: 0.14;
+    --scrollbar-thumb-hover-opacity: 0.34;
+    --scrollbar-thumb-active-opacity: 0.5;
   }
 
   .dark {
@@ -75,11 +77,6 @@
     --border: 220 20% 20%;
     --input: 220 20% 22%;
     --ring: 214 100% 66%;
-
-    --scrollbar-track: 222 30% 12%;
-    --scrollbar-thumb: 220 16% 30%;
-    --scrollbar-thumb-hover: 220 16% 42%;
-    --scrollbar-thumb-active: 214 60% 56%;
   }
 }
 
@@ -105,11 +102,20 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Premium scrollbar system
+   Premium scrollbar system — thin overlay-style pill, near-invisible at rest,
+   brightens on interaction. Derived entirely from --foreground/--primary at
+   low opacity rather than a separate gray, so it self-adjusts to light/dark
+   and to whatever surface a scroll region sits on (sidebar, card, dialog)
+   without ever needing its own per-surface tuning.
    ---------------------------------------------------------------------------
-   Scope: precise-pointer devices only. Touch devices keep the native,
-   momentum-friendly overlay scrollbars (`@media (pointer: fine)` never
-   matches there), so nothing below affects phones/tablets.
+   Deliberately NOT gated behind `@media (pointer: fine)` — that query is a
+   heuristic guess at the input device, and it can (and did, in the field)
+   fail to match on real desktop Chrome in some virtualized/remote-desktop
+   environments, silently skipping this entire block and leaving the stock
+   OS scrollbar (arrow buttons and all) in place with zero visible error.
+   `::-webkit-scrollbar-*` customization is inert on genuine touch browsers
+   anyway (they always show their own overlay scrollbar), so there is no
+   real downside to applying it unconditionally.
 
    Scroll owners audited and covered:
      • the document (html/body)
@@ -121,72 +127,56 @@
    Scrolling is never hidden and no nested scroll traps are introduced —
    `.no-scrollbar` remains reserved for chrome-less snap strips.
    --------------------------------------------------------------------------- */
-@media (pointer: fine) {
-  @supports (scrollbar-width: thin) {
-    html {
-      scrollbar-width: thin;
-      scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track) / 0.55);
-    }
-    /* Firefox has no :hover state for scrollbars — keep a legible resting
-       colour on every scroll owner instead. */
-    * {
-      scrollbar-width: thin;
-      scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
-    }
-    .scroll-region,
-    .scroll-region-x {
-      scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track) / 0.4);
-    }
-  }
+/* WebKit/Blink (Chrome, Edge, Safari) custom scrollbars.
+   Deliberately do NOT set the standard `scrollbar-width`/`scrollbar-color`
+   properties on any Chromium element: modern Chromium treats those as an
+   opt-in to its OWN native standardized scrollbar renderer, which then
+   ignores `::-webkit-scrollbar-*` customization entirely (this is what
+   produced the old-school native bar with visible step buttons — setting
+   `scrollbar-width: thin` here was silently overriding every rule below
+   it). Chromium/Safari get 100% of their styling from the pseudo-elements;
+   Firefox — which has no `::-webkit-scrollbar` support at all — gets the
+   standard properties in its own `@supports` block further down. */
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+/* Chromium keeps its native step/arrow buttons at the ends of a scrollbar
+   even after `::-webkit-scrollbar-thumb` is customized, unless they are
+   explicitly collapsed — this is the single most common reason a "custom"
+   scrollbar still looks like the old chunky OS default. */
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--foreground) / var(--scrollbar-thumb-resting-opacity));
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  transition: background-color 0.2s ease;
+  min-height: 40px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--foreground) / var(--scrollbar-thumb-hover-opacity));
+}
+/* Branded touch while actively dragging the thumb. */
+::-webkit-scrollbar-thumb:active {
+  background-color: hsl(var(--primary) / var(--scrollbar-thumb-active-opacity));
+}
 
-  ::-webkit-scrollbar {
-    width: var(--scrollbar-size);
-    height: var(--scrollbar-size);
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-thumb {
-    background-color: hsl(var(--scrollbar-thumb));
-    border: 3px solid transparent;
-    border-radius: 999px;
-    background-clip: padding-box;
-    transition: background-color 0.15s ease;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background-color: hsl(var(--scrollbar-thumb-hover));
-  }
-  ::-webkit-scrollbar-thumb:active {
-    background-color: hsl(var(--scrollbar-thumb-active));
-  }
-  ::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-
-  /* Root document keeps a faint track so the page scroll position stays legible */
-  html::-webkit-scrollbar-track {
-    background: hsl(var(--scrollbar-track) / 0.55);
-  }
-
-  /* Declared scroll owners: slightly narrower bar, faint inset track that only
-     becomes visible while the region is hovered or actively scrolled. */
-  .scroll-region::-webkit-scrollbar,
-  .scroll-region-x::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  .scroll-region::-webkit-scrollbar-track,
-  .scroll-region-x::-webkit-scrollbar-track {
-    background: transparent;
-    border-radius: 999px;
-  }
-  .scroll-region:hover::-webkit-scrollbar-track,
-  .scroll-region-x:hover::-webkit-scrollbar-track {
-    background: hsl(var(--scrollbar-track) / 0.5);
-  }
-  .scroll-region::-webkit-scrollbar-thumb,
-  .scroll-region-x::-webkit-scrollbar-thumb {
-    border-width: 2.5px;
+/* Firefox: the only browser that reads these two standard properties, and
+   has no per-state hover styling for scrollbars, so a slightly higher
+   constant opacity keeps the thumb legible without a brighten-on-hover net. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--foreground) / 0.25) transparent;
   }
 }
 

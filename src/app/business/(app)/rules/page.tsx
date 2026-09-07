@@ -51,35 +51,37 @@ export default function RulesPage() {
   const activeCount = state.rules.filter((r) => r.enabled).length;
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Reward Rules"
-        description="Define exactly how members earn points. Rules apply automatically at checkout."
-        actions={<Button onClick={() => setBuilderOpen(true)}><Plus /> Create Rule</Button>}
-      />
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <PageHeader
+          title="Reward Rules"
+          description="Define exactly how members earn points. Rules apply automatically at checkout."
+          actions={<Button onClick={() => setBuilderOpen(true)}><Plus /> Create Rule</Button>}
+        />
 
-      <Card className="flex flex-wrap items-center justify-between gap-4 p-4">
-        <div className="flex items-center gap-3">
-          <div className="flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"><Zap className="size-5" aria-hidden /></div>
-          <div>
-            <p className="text-sm font-medium">Base earn rate</p>
-            <p className="text-xs text-muted-foreground">10 points per ₹100 spent, multiplied by the member&apos;s tier.</p>
+        <Card className="flex flex-wrap items-center justify-between gap-4 p-4">
+          <div className="flex items-center gap-3">
+            <div className="flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary"><Zap className="size-5" aria-hidden /></div>
+            <div>
+              <p className="text-sm font-medium">Base earn rate</p>
+              <p className="text-xs text-muted-foreground">10 points per ₹100 spent, multiplied by the member&apos;s tier.</p>
+            </div>
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          {[["Bronze", "1x"], ["Silver", "1.25x"], ["Gold", "1.5x"], ["Platinum", "2x"]].map(([t, m]) => (
-            <Badge key={t} variant="secondary" className="tabular">{t} {m}</Badge>
-          ))}
-        </div>
-      </Card>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {[["Bronze", "1x"], ["Silver", "1.25x"], ["Gold", "1.5x"], ["Platinum", "2x"]].map(([t, m]) => (
+              <Badge key={t} variant="secondary" className="tabular">{t} {m}</Badge>
+            ))}
+          </div>
+        </Card>
 
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">
-          Active rules <span className="text-muted-foreground">({activeCount} of {state.rules.length} enabled)</span>
-        </h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold">
+            Active rules <span className="text-muted-foreground">({activeCount} of {state.rules.length} enabled)</span>
+          </h2>
+        </div>
       </div>
 
-      <div className="space-y-2.5">
+      <div className="space-y-2.5 flex-1 min-h-0 overflow-y-auto scroll-region p-1">
         <AnimatePresence initial={false}>
           {state.rules.map((rule) => {
             const Icon = iconFor(rule.type);

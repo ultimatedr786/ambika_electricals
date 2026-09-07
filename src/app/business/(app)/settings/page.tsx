@@ -17,11 +17,83 @@ import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { InstallAppAction } from "@/components/shared/install-app-action";
 import { LiveLoyaltyRulePanel } from "@/components/business/live-loyalty-rule-panel";
 import { LiveBusinessSettingsPanel } from "@/components/business/live-business-settings-panel";
-import { isDemoDevToolsEnabled } from "@/lib/auth/env";
+import { isDemoDevToolsEnabled, isSupabaseConfigured } from "@/lib/auth/env";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
+import { createClient } from "@/lib/supabase/client";
 import { tiers } from "@/lib/mock-data/business";
 import { formatINR } from "@/lib/utils";
+
+const BUSINESS_CATEGORY_LABEL: Record<string, { title: string; hint: string }> = {
+  stock: { title: "Low stock alerts", hint: "Notify when a product drops below its threshold" },
+  reward: { title: "Reward redemptions", hint: "When a member reserves or collects a reward" },
+};
+
+function useLiveNotificationPrefs() {
+  const configured = isSupabaseConfigured();
+  const supabase = React.useMemo(() => createClient(), []);
+  const [businessId, setBusinessId] = React.useState<string | null>(null);
+  const [muted, setMutedState] = React.useState<string[]>([]);
+  const [loading, setLoading] = React.useState(configured);
+
+  React.useEffect(() => {
+    if (!configured || !supabase) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      setLoading(true);
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        if (!cancelled) setLoading(false);
+        return;
+      }
+      const { data: me } = await supabase
+        .from("business_memberships")
+        .select("business_id")
+        .eq("profile_id", user.id)
+        .eq("status", "active")
+        .limit(1)
+        .maybeSingle();
+      const bid = (me as { business_id: string } | null)?.business_id ?? null;
+      if (!bid) {
+        if (!cancelled) setLoading(false);
+        return;
+      }
+      const { data: pref } = await supabase
+        .from("notification_preferences")
+        .select("muted_categories")
+        .eq("business_id", bid)
+        .maybeSingle();
+      if (cancelled) return;
+      setBusinessId(bid);
+      setMutedState(((pref as { muted_categories: string[] } | null)?.muted_categories) ?? []);
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [configured, supabase]);
+
+  const setMuted = React.useCallback(
+    async (category: string, isMuted: boolean) => {
+      if (!supabase || !businessId) return;
+      const next = isMuted ? [...new Set([...muted, category])] : muted.filter((c) => c !== category);
+      setMutedState(next);
+      const { error } = await supabase.rpc("set_notification_preferences", {
+        p_business_id: businessId,
+        p_muted_categories: next,
+      });
+      if (error) setMutedState(muted);
+    },
+    [supabase, businessId, muted]
+  );
+
+  return { configured, muted, loading, setMuted };
+}
 
 export default function SettingsPage() {
   const { reset } = useStore();
@@ -30,6 +102,8 @@ export default function SettingsPage() {
   // Reset-demo-data is a development/preview control only — never a
   // production affordance (MVP hotfix §"Remove visible Demo Mode").
   const devTools = isDemoDevToolsEnabled();
+  const configured = isSupabaseConfigured();
+  const liveNotify = useLiveNotificationPrefs();
 
   const [profile, setProfile] = React.useState({
     name: business.name, owner: business.ownerName, gst: business.gst,
@@ -39,7 +113,7 @@ export default function SettingsPage() {
   const [notify, setNotify] = React.useState({ lowStock: true, dailySummary: true, newMember: true, redemption: true, campaignEnd: false });
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 flex-1 min-h-0 overflow-y-auto scroll-region pb-6 pr-1">
       <PageHeader title="Settings" description="Configure your business profile, loyalty programme and preferences." />
 
       <Tabs defaultValue="business">
@@ -56,23 +130,25 @@ export default function SettingsPage() {
               configured; the prototype card below stays for demo mode. */}
           <LiveBusinessSettingsPanel />
 
-          <Card className="p-5">
-            <h2 className="flex items-center gap-2 text-sm font-semibold"><Building2 className="size-4 text-muted-foreground" aria-hidden /> Business profile</h2>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              <Field label="Business name" value={profile.name} onChange={(v) => setProfile({ ...profile, name: v })} />
-              <Field label="Owner name" value={profile.owner} onChange={(v) => setProfile({ ...profile, owner: v })} />
-              <Field label="GST number" value={profile.gst} onChange={(v) => setProfile({ ...profile, gst: v })} />
-              <Field label="Phone" value={profile.phone} onChange={(v) => setProfile({ ...profile, phone: v })} />
-              <Field label="Email" value={profile.email} onChange={(v) => setProfile({ ...profile, email: v })} />
-              <Field label="Category" value={business.category} onChange={() => {}} />
-              <div className="sm:col-span-2">
-                <Field label="Registered address" value={profile.address} onChange={(v) => setProfile({ ...profile, address: v })} />
+          {!configured && (
+            <Card className="p-5">
+              <h2 className="flex items-center gap-2 text-sm font-semibold"><Building2 className="size-4 text-muted-foreground" aria-hidden /> Business profile</h2>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <Field label="Business name" value={profile.name} onChange={(v) => setProfile({ ...profile, name: v })} />
+                <Field label="Owner name" value={profile.owner} onChange={(v) => setProfile({ ...profile, owner: v })} />
+                <Field label="GST number" value={profile.gst} onChange={(v) => setProfile({ ...profile, gst: v })} />
+                <Field label="Phone" value={profile.phone} onChange={(v) => setProfile({ ...profile, phone: v })} />
+                <Field label="Email" value={profile.email} onChange={(v) => setProfile({ ...profile, email: v })} />
+                <Field label="Category" value={business.category} onChange={() => {}} />
+                <div className="sm:col-span-2">
+                  <Field label="Registered address" value={profile.address} onChange={(v) => setProfile({ ...profile, address: v })} />
+                </div>
               </div>
-            </div>
-            <div className="mt-4 flex justify-end">
-              <Button onClick={() => toast.success("Business profile saved.")}>Save changes</Button>
-            </div>
-          </Card>
+              <div className="mt-4 flex justify-end">
+                <Button onClick={() => toast.success("Business profile saved.")}>Save changes</Button>
+              </div>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="loyalty" className="mt-4 space-y-4">
@@ -80,31 +156,33 @@ export default function SettingsPage() {
               configured; the prototype card below stays for demo mode. */}
           <LiveLoyaltyRulePanel />
 
-          <Card className="p-5">
-            <h2 className="flex items-center gap-2 text-sm font-semibold"><Coins className="size-4 text-muted-foreground" aria-hidden /> Earning &amp; redemption</h2>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              <NumField label="Spend threshold (₹)" value={earn.spend} onChange={(v) => setEarn({ ...earn, spend: v })} />
-              <NumField label="Points awarded" value={earn.points} onChange={(v) => setEarn({ ...earn, points: v })} />
-              <NumField label="Minimum points to redeem" value={earn.minRedeem} onChange={(v) => setEarn({ ...earn, minRedeem: v })} />
-              <div className="rounded-lg border border-dashed p-3">
-                <p className="text-sm font-medium">Points expiry</p>
-                <p className="mt-0.5 text-[13px] text-muted-foreground">
-                  None. Points expiry is part of the live loyalty rule, and no expiry process runs at launch.
+          {!configured && (
+            <Card className="p-5">
+              <h2 className="flex items-center gap-2 text-sm font-semibold"><Coins className="size-4 text-muted-foreground" aria-hidden /> Earning &amp; redemption</h2>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <NumField label="Spend threshold (₹)" value={earn.spend} onChange={(v) => setEarn({ ...earn, spend: v })} />
+                <NumField label="Points awarded" value={earn.points} onChange={(v) => setEarn({ ...earn, points: v })} />
+                <NumField label="Minimum points to redeem" value={earn.minRedeem} onChange={(v) => setEarn({ ...earn, minRedeem: v })} />
+                <div className="rounded-lg border border-dashed p-3">
+                  <p className="text-sm font-medium">Points expiry</p>
+                  <p className="mt-0.5 text-[13px] text-muted-foreground">
+                    None. Points expiry is part of the live loyalty rule, and no expiry process runs at launch.
+                  </p>
+                </div>
+              </div>
+              <Separator className="my-4" />
+              <div className="rounded-lg border bg-muted/30 p-4 text-sm">
+                <p className="font-medium">Current earn model</p>
+                <p className="mt-1 text-muted-foreground">
+                  A member spending {formatINR(earn.spend)} earns <span className="font-medium text-foreground">{earn.points} points</span>, multiplied by their tier.
+                  1 point ≈ ₹{earn.pointValue.toFixed(2)}, so {earn.minRedeem} points is worth about {formatINR(Math.round(earn.minRedeem * earn.pointValue))}.
                 </p>
               </div>
-            </div>
-            <Separator className="my-4" />
-            <div className="rounded-lg border bg-muted/30 p-4 text-sm">
-              <p className="font-medium">Current earn model</p>
-              <p className="mt-1 text-muted-foreground">
-                A member spending {formatINR(earn.spend)} earns <span className="font-medium text-foreground">{earn.points} points</span>, multiplied by their tier.
-                1 point ≈ ₹{earn.pointValue.toFixed(2)}, so {earn.minRedeem} points is worth about {formatINR(Math.round(earn.minRedeem * earn.pointValue))}.
-              </p>
-            </div>
-            <div className="mt-4 flex justify-end">
-              <Button onClick={() => toast.success("Loyalty settings saved.")}>Save changes</Button>
-            </div>
-          </Card>
+              <div className="mt-4 flex justify-end">
+                <Button onClick={() => toast.success("Loyalty settings saved.")}>Save changes</Button>
+              </div>
+            </Card>
+          )}
 
           {devTools && (
             <Card className="p-5">
@@ -149,27 +227,44 @@ export default function SettingsPage() {
           <Card className="divide-y p-0">
             <div className="p-5 pb-4">
               <h2 className="flex items-center gap-2 text-sm font-semibold"><Bell className="size-4 text-muted-foreground" aria-hidden /> Notification preferences</h2>
-              <p className="mt-1 text-xs text-muted-foreground">In-app only — no SMS, email or WhatsApp is sent in this prototype.</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {configured ? "In-app only — these mute the in-app bell, nothing is emailed or texted." : "In-app only — no SMS, email or WhatsApp is sent in this prototype."}
+              </p>
             </div>
-            {([
-              ["lowStock", "Low stock alerts", "Notify when a product drops below 50 units"],
-              ["dailySummary", "Daily sales summary", "A recap of sales and points each evening"],
-              ["newMember", "New member joins", "When a customer enrols in the programme"],
-              ["redemption", "Reward redemptions", "When a member redeems a reward"],
-              ["campaignEnd", "Campaign ending soon", "Three days before a campaign ends"],
-            ] as const).map(([key, title, hint]) => (
-              <div key={key} className="flex items-center justify-between gap-4 p-4">
-                <div>
-                  <p className="text-sm font-medium">{title}</p>
-                  <p className="text-xs text-muted-foreground">{hint}</p>
-                </div>
-                <Switch
-                  checked={notify[key]}
-                  aria-label={title}
-                  onCheckedChange={(v) => { setNotify({ ...notify, [key]: v }); toast.success(`${title} ${v ? "enabled" : "disabled"}.`); }}
-                />
-              </div>
-            ))}
+            {configured
+              ? (["stock", "reward"] as const).map((cat) => (
+                  <div key={cat} className="flex items-center justify-between gap-4 p-4">
+                    <div>
+                      <p className="text-sm font-medium">{BUSINESS_CATEGORY_LABEL[cat].title}</p>
+                      <p className="text-xs text-muted-foreground">{BUSINESS_CATEGORY_LABEL[cat].hint}</p>
+                    </div>
+                    <Switch
+                      checked={!liveNotify.muted.includes(cat)}
+                      aria-label={BUSINESS_CATEGORY_LABEL[cat].title}
+                      disabled={liveNotify.loading}
+                      onCheckedChange={(v) => void liveNotify.setMuted(cat, !v)}
+                    />
+                  </div>
+                ))
+              : ([
+                  ["lowStock", "Low stock alerts", "Notify when a product drops below 50 units"],
+                  ["dailySummary", "Daily sales summary", "A recap of sales and points each evening"],
+                  ["newMember", "New member joins", "When a customer enrols in the programme"],
+                  ["redemption", "Reward redemptions", "When a member redeems a reward"],
+                  ["campaignEnd", "Campaign ending soon", "Three days before a campaign ends"],
+                ] as const).map(([key, title, hint]) => (
+                  <div key={key} className="flex items-center justify-between gap-4 p-4">
+                    <div>
+                      <p className="text-sm font-medium">{title}</p>
+                      <p className="text-xs text-muted-foreground">{hint}</p>
+                    </div>
+                    <Switch
+                      checked={notify[key]}
+                      aria-label={title}
+                      onCheckedChange={(v) => { setNotify({ ...notify, [key]: v }); toast.success(`${title} ${v ? "enabled" : "disabled"}.`); }}
+                    />
+                  </div>
+                ))}
           </Card>
         </TabsContent>
 

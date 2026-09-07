@@ -242,6 +242,16 @@ lines.push(
   "- The QR-scan flow audits the counter dialog in its post-scan state; camera capture is out of " +
     "scope for this MVP by design."
 );
+lines.push(
+  "- **Light mode only.** This script never toggles the `.dark` class or emulates " +
+    "`prefers-color-scheme: dark`, so every page above was audited exactly as it renders by " +
+    "default (light theme). `globals.css` defines separate color tokens for `.dark` " +
+    "(including `--primary`, `--success` and `--warning` — the same tokens MVP_HANDOFF.md §6 " +
+    "records as deliberately darkened for AA contrast in light mode), and axe-core has never " +
+    "run against them. Dark-mode contrast is unverified, not passing — do not infer dark-mode " +
+    "accessibility from this report, including from the Playwright UI gate's separate " +
+    "\"desktop light + dark\" coverage, which checks functional behaviour, not WCAG contrast."
+);
 lines.push("");
 
 writeFileSync(OUT, `${lines.join("\n")}\n`);

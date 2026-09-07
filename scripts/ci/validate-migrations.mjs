@@ -17,7 +17,11 @@ import pg from "pg";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const migrationsDir = join(repoRoot, "supabase/migrations");
-const TEST_DB = process.env.VALIDATE_DB_NAME || "migration_validation";
+// Unique per process by default — two concurrent runs against the same
+// server (two terminals, two overlapping CI jobs) would otherwise race on
+// DROP DATABASE/CREATE DATABASE for the same fixed name (confirmed to
+// actually happen for the identically-shaped race in run.mjs/pgtap-run.mjs).
+const TEST_DB = process.env.VALIDATE_DB_NAME || `migration_validation_${process.pid}`;
 
 const PG = {
   host: process.env.PGHOST || "127.0.0.1",
@@ -70,7 +74,11 @@ console.log(`Validating ${files.length} migration(s) against ${PG.host}:${PG.por
 // ---------------------------------------------------------------------------
 await withClient("postgres", async (c) => {
   await c.query(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
-  await c.query(`CREATE DATABASE ${TEST_DB}`);
+  // Explicit UTF8/C so this matches every hosted Supabase project and the
+  // CI Linux runners regardless of the target server's own default locale
+  // (a Windows cluster left at its OS-locale default is WIN1252, which
+  // cannot store the non-ASCII characters used in some migration comments).
+  await c.query(`CREATE DATABASE ${TEST_DB} ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0`);
 });
 
 await withClient(TEST_DB, async (c) => {

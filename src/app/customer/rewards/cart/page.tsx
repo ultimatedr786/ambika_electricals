@@ -48,7 +48,7 @@ export default function RewardsCartPage() {
   }
 
   return (
-    <div className="space-y-5 pb-28 lg:pb-0">
+    <div className="space-y-5 flex-1 min-h-0 overflow-y-auto scroll-region pb-28 lg:pb-6 pr-1">
       <PageHeader
         title="Reward basket"
         description={`${lines.length} ${lines.length === 1 ? "item" : "items"} ready to redeem.`}

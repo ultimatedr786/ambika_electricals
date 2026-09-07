@@ -28,7 +28,15 @@ const ADMIN_URL =
   `postgres://${process.env.PGUSER || "postgres"}:${process.env.PGPASSWORD || "postgres"}@${
     process.env.PGHOST || "127.0.0.1"
   }:${process.env.PGPORT || 54329}/${process.env.PGDATABASE || "postgres"}`;
-const TEST_DB = process.env.RLS_DB_NAME || "rewardly_test";
+// Unique per process by default so two concurrent invocations against the
+// same Postgres server (two terminals, two CI jobs sharing a service
+// container, a laptop running this alongside another script) never race on
+// DROP DATABASE/CREATE DATABASE for the same name — confirmed to actually
+// happen: `duplicate key value violates unique constraint
+// "pg_database_datname_index" ... Key (datname)=(rewardly_test) already
+// exists` when two runs overlapped. Set RLS_DB_NAME to pin a fixed,
+// inspectable name when you know only one run will ever use it.
+const TEST_DB = process.env.RLS_DB_NAME || `rewardly_test_${process.pid}`;
 
 function adminUrlFor(db) {
   const u = new URL(ADMIN_URL);

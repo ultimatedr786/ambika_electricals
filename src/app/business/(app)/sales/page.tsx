@@ -21,7 +21,7 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { useStore } from "@/lib/store";
 import { LiveSalesPanel } from "@/components/business/live-sales-panel";
 import { isSupabaseConfigured } from "@/lib/auth/env";
-import { formatDate, formatDateTime, formatINR, formatNumber } from "@/lib/utils";
+import { formatDate, formatDateTime, formatINR, formatNumber, formatTime } from "@/lib/utils";
 import type { Sale } from "@/types";
 
 const ranges = [
@@ -89,40 +89,38 @@ export default function SalesPage() {
   );
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Sales"
-        description="Every invoice raised at Ambika Electricals."
-        actions={<Button asChild><Link href="/business/sales/new"><Plus /> New Sale</Link></Button>}
-      />
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <PageHeader
+          title="Sales"
+          description="Every invoice raised at Ambika Electricals."
+          actions={<Button asChild><Link href="/business/sales/new"><Plus /> New Sale</Link></Button>}
+        />
 
-      {/* Live Supabase sales — renders only when auth is configured */}
+        {!isSupabaseConfigured() && (
+          <>
+            <div className="grid grid-cols-3 gap-3">
+              <Card className="p-4"><p className="text-xs text-muted-foreground">Invoices</p><p className="mt-1 text-xl font-semibold tabular">{results.length}</p></Card>
+              <Card className="p-4"><p className="text-xs text-muted-foreground">Revenue</p><p className="mt-1 text-xl font-semibold tabular">{formatINR(revenue, { compact: true })}</p></Card>
+              <Card className="p-4"><p className="text-xs text-muted-foreground">Points issued</p><p className="mt-1 text-xl font-semibold tabular text-success">+{formatNumber(points)}</p></Card>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <SearchInput value={query} onChange={setQuery} placeholder="Search invoice or customer" className="min-w-[220px] flex-1" />
+              <div className="hidden lg:block">{filterControls}</div>
+              <Button variant="outline" className="lg:hidden" onClick={() => setFiltersOpen(true)}>
+                <Filter /> Filters{activeFilters > 0 && <Badge className="ml-1">{activeFilters}</Badge>}
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-region space-y-4 p-1">
       <LiveSalesPanel />
 
-      {isSupabaseConfigured() && (
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-muted-foreground">Prototype sales</h2>
-          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Demo data — migrates in a later slice
-          </span>
-        </div>
-      )}
-
-      <div className="grid grid-cols-3 gap-3">
-        <Card className="p-4"><p className="text-xs text-muted-foreground">Invoices</p><p className="mt-1 text-xl font-semibold tabular">{results.length}</p></Card>
-        <Card className="p-4"><p className="text-xs text-muted-foreground">Revenue</p><p className="mt-1 text-xl font-semibold tabular">{formatINR(revenue, { compact: true })}</p></Card>
-        <Card className="p-4"><p className="text-xs text-muted-foreground">Points issued</p><p className="mt-1 text-xl font-semibold tabular text-success">+{formatNumber(points)}</p></Card>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2.5">
-        <SearchInput value={query} onChange={setQuery} placeholder="Search invoice or customer" className="min-w-[220px] flex-1" />
-        <div className="hidden lg:block">{filterControls}</div>
-        <Button variant="outline" className="lg:hidden" onClick={() => setFiltersOpen(true)}>
-          <Filter /> Filters{activeFilters > 0 && <Badge className="ml-1">{activeFilters}</Badge>}
-        </Button>
-      </div>
-
-      {results.length === 0 ? (
+      {!isSupabaseConfigured() && (
+      results.length === 0 ? (
         <EmptyState
           icon={Receipt}
           title="Your sales activity will appear here."
@@ -133,36 +131,37 @@ export default function SalesPage() {
         <>
           {/* Desktop table */}
           <Card className="hidden overflow-hidden lg:block">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Invoice</TableHead>
-                  <TableHead>Customer</TableHead>
-                  <TableHead>Products</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead className="text-right">Points</TableHead>
-                  <TableHead>Store</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {results.map((s) => (
-                  <TableRow key={s.id} className="cursor-pointer" onClick={() => setOpen(s)}>
-                    <TableCell className="font-medium tabular">{s.invoice}</TableCell>
-                    <TableCell>{s.customerName}</TableCell>
-                    <TableCell className="max-w-[240px] truncate text-muted-foreground">
-                      {s.items.map((i) => `${i.qty} × ${i.name}`).join(", ")}
-                    </TableCell>
-                    <TableCell className="text-right font-medium tabular">{formatINR(s.amount)}</TableCell>
-                    <TableCell className="text-right tabular text-success">+{formatNumber(s.points)}</TableCell>
-                    <TableCell className="text-muted-foreground">{s.store}</TableCell>
-                    <TableCell className="whitespace-nowrap text-muted-foreground">{formatDate(s.date, "long")}</TableCell>
-                    <TableCell><StatusBadge status={s.status} /></TableCell>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Invoice</TableHead>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Products</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
+                    <TableHead className="text-right">Points</TableHead>
+                    <TableHead>Store</TableHead>
+                    <TableHead>Status</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {results.map((s) => (
+                    <TableRow key={s.id} className="cursor-pointer" onClick={() => setOpen(s)}>
+                      <TableCell className="font-medium tabular">
+                        {s.invoice}
+                        <p className="mt-0.5 text-xs font-normal text-muted-foreground">{formatTime(s.date)}</p>
+                      </TableCell>
+                      <TableCell>{s.customerName}</TableCell>
+                      <TableCell className="max-w-[240px] truncate text-muted-foreground">
+                        {s.items.map((i) => `${i.qty} × ${i.name}`).join(", ")}
+                      </TableCell>
+                      <TableCell className="text-right font-medium tabular">{formatINR(s.amount)}</TableCell>
+                      <TableCell className="text-right tabular text-success">+{formatNumber(s.points)}</TableCell>
+                      <TableCell className="text-muted-foreground">{s.store}</TableCell>
+                      <TableCell><StatusBadge status={s.status} /></TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
           </Card>
 
           {/* Mobile cards */}
@@ -192,7 +191,9 @@ export default function SalesPage() {
             ))}
           </div>
         </>
+      )
       )}
+      </div>
 
       <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
         <SheetContent side="bottom">

@@ -29,6 +29,10 @@ export function formatDateTime(iso: string) {
   return `${formatDate(iso)} · ${d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}`;
 }
 
+export function formatTime(iso: string) {
+  return new Date(iso).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+}
+
 export function relativeTime(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.round(diff / 60000);

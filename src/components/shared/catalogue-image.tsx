@@ -29,6 +29,10 @@ export interface CatalogueImageRef {
   altText: string | null;
 }
 
+export interface CatalogueImageWithId extends CatalogueImageRef {
+  imageId: string;
+}
+
 export function CatalogueImage({
   image,
   name,
@@ -88,9 +92,9 @@ export function CatalogueImage({
 export function useCatalogueImages(
   owner: "product" | "reward",
   ids: string[]
-): Map<string, CatalogueImageRef> {
+): Map<string, CatalogueImageWithId> {
   const supabase = React.useMemo(() => createClient(), []);
-  const [map, setMap] = React.useState<Map<string, CatalogueImageRef>>(new Map());
+  const [map, setMap] = React.useState<Map<string, CatalogueImageWithId>>(new Map());
 
   // Stable dependency: the identity of the array changes on every render.
   const key = ids.slice().sort().join(",");
@@ -110,11 +114,12 @@ export function useCatalogueImages(
       .eq("is_primary", true)
       .then(({ data }) => {
         if (cancelled) return;
-        const next = new Map<string, CatalogueImageRef>();
+        const next = new Map<string, CatalogueImageWithId>();
         for (const row of (data ?? []) as Record<string, unknown>[]) {
           const ownerId = row[column];
           if (typeof ownerId !== "string") continue;
           next.set(ownerId, {
+            imageId: String(row.id),
             bucket: String(row.bucket),
             path: String(row.path),
             altText: row.alt_text == null ? null : String(row.alt_text),

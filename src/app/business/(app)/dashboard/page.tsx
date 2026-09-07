@@ -44,7 +44,7 @@ export default function BusinessDashboard() {
   }
 
   return (
-    <div className="space-y-5 sm:space-y-6">
+    <div className="space-y-5 sm:space-y-6 flex-1 min-h-0 overflow-y-auto scroll-region pb-6 pr-1">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-sm text-muted-foreground">{greeting()} 👋</p>

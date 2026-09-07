@@ -77,7 +77,7 @@ demo-mode absence, PWA.
 Also on a Docker machine:
 
 ```bash
-npx supabase test db        # pgTAP suite (48 assertions)
+npx supabase test db        # pgTAP suite (311 assertions — see supabase/tests/rls_policy_tests.sql)
 npx supabase db reset       # local stack: migrations + dev seed (never against cloud)
 ```
 

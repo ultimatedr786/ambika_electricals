@@ -58,31 +58,27 @@ export default function StaffPage() {
   };
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Staff"
-        description="Team members who can operate the rewards programme."
-        actions={<Button onClick={() => setOpen(true)}><UserPlus /> Invite Staff</Button>}
-      />
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <PageHeader
+          title="Staff"
+          description="Team members who can operate the rewards programme."
+          actions={!isSupabaseConfigured() ? <Button onClick={() => setOpen(true)}><UserPlus /> Invite Staff</Button> : undefined}
+        />
 
-      {/* Live Supabase team & invitations — renders only when auth is configured */}
+        {!isSupabaseConfigured() && (
+          <SearchInput value={query} onChange={setQuery} placeholder="Search staff by name, email or role" className="max-w-md" />
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-region space-y-4 pr-1">
       <LiveTeamPanel />
 
-      {isSupabaseConfigured() && (
-        <div className="flex items-center gap-2 pt-1">
-          <h2 className="text-sm font-semibold text-muted-foreground">Prototype roster</h2>
-          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Demo data — migrates in a later slice
-          </span>
-        </div>
-      )}
-
-      <SearchInput value={query} onChange={setQuery} placeholder="Search staff by name, email or role" className="max-w-md" />
-
-      {results.length === 0 ? (
+      {!isSupabaseConfigured() && (
+      results.length === 0 ? (
         <EmptyState icon={UserPlus} title="No staff found." description="Try a different search term." />
       ) : (
-        <>
+        <div className="space-y-4">
           <Card className="hidden overflow-hidden md:block">
             <Table>
               <TableHeader>
@@ -152,22 +148,24 @@ export default function StaffPage() {
               </Card>
             ))}
           </div>
-        </>
-      )}
 
-      <Card className="p-5">
-        <h2 className="flex items-center gap-2 text-sm font-semibold"><ShieldCheck className="size-4 text-muted-foreground" aria-hidden /> Role permissions</h2>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {roles.map((r) => (
-            <div key={r} className="rounded-lg border bg-muted/30 p-3.5">
-              <p className="text-sm font-medium">{r}</p>
-              <ul className="mt-2 space-y-1">
-                {permissions[r].map((p) => <li key={p} className="text-xs text-muted-foreground">• {p}</li>)}
-              </ul>
+          <Card className="p-5">
+            <h2 className="flex items-center gap-2 text-sm font-semibold"><ShieldCheck className="size-4 text-muted-foreground" aria-hidden /> Role permissions</h2>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {roles.map((r) => (
+                <div key={r} className="rounded-lg border bg-muted/30 p-3.5">
+                  <p className="text-sm font-medium">{r}</p>
+                  <ul className="mt-2 space-y-1">
+                    {permissions[r].map((p) => <li key={p} className="text-xs text-muted-foreground">• {p}</li>)}
+                  </ul>
+                </div>
+              ))}
             </div>
-          ))}
+          </Card>
         </div>
-      </Card>
+      )
+      )}
+      </div>
 
       <FormDialog
         open={open}

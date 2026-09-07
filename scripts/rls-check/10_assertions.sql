@@ -1192,9 +1192,9 @@ begin
   perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
 
   select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 75,
-                             'sale', null, null, 'l4-double-post', null) into v_res1;
+                             'sale', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l4-double-post', null) into v_res1;
   select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 75,
-                             'sale', null, null, 'l4-double-post', null) into v_res2;
+                             'sale', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l4-double-post', null) into v_res2;
 
   if not (v_res2 ->> 'replayed')::boolean then raise exception 'ASSERT: L4 second call did not report replay'; end if;
   if (v_res1 ->> 'entry_id') <> (v_res2 ->> 'entry_id') then raise exception 'ASSERT: L4 replay returned a different entry'; end if;
@@ -1221,7 +1221,7 @@ begin
 
   -- staff cannot spend
   perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
-  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 200, 'sale', null, null, 'l5-earn', null) into v_res;
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 200, 'sale', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l5-earn', null) into v_res;
   begin
     perform public.spend_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 50, 'redemption', null, null, 'l5-staff-spend', null);
     raise exception 'ASSERT: L5 staff spent points';
@@ -1284,7 +1284,7 @@ begin
 
   execute 'set local role authenticated';
   perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
-  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 100, 'welcome', null, null, 'l7-earn', null) into v_res;
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 100, 'welcome', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l7-earn', null) into v_res;
 
   -- manager cannot adjust
   perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
@@ -1335,7 +1335,7 @@ begin
 
   execute 'set local role authenticated';
   perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
-  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 60, 'manual', null, null, 'l8-earn', null) into v_res;
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 60, 'manual', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l8-earn', null) into v_res;
   v_id := (v_res ->> 'entry_id')::bigint;
 
   -- authenticated has no INSERT/UPDATE/DELETE grant at all
@@ -1390,8 +1390,8 @@ begin
   -- seed entries as staff-main (Ambika) and Volt owner (Volt)
   execute 'set local role authenticated';
   perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
-  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_rahul_mem, 30, 'manual', null, null, 'l9-rahul-1', null) into v_res;
-  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_other_mem, 31, 'manual', null, null, 'l9-other-1', null) into v_res;
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_rahul_mem, 30, 'manual', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l9-rahul-1', null) into v_res;
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_other_mem, 31, 'manual', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l9-other-1', null) into v_res;
   perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
   select public.award_points('aaaaaaaa-0000-4000-8000-000000000002', v_volt_mem, 32, 'manual', null, null, 'l9-volt-1', null) into v_res;
 
@@ -1458,7 +1458,8 @@ begin
   execute 'set local role authenticated';
   perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
   begin
-    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 10, 'manual', null, null, 'l10-blocked', null);
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 10, 'manual', null,
+                                'bbbbbbbb-0000-4000-8000-000000000001', 'l10-blocked', null);
     raise exception 'ASSERT: L10 award into a blocked membership was allowed';
   exception when invalid_parameter_value then null;
   end;
@@ -1471,6 +1472,72 @@ begin
     raise exception 'ASSERT: L10 direct insert into a blocked membership was allowed';
   exception when invalid_parameter_value then null;
   end;
+end $$;
+
+-- CASE: L11 ledger — store-scoped staff cannot bypass store confinement by
+-- omitting p_store_id (regression for the store-scoping bypass fix)
+do $$
+declare
+  v_mem uuid; v_res jsonb;
+begin
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'L11 Member', 'active')
+  returning id into v_mem;
+
+  execute 'set local role authenticated';
+
+  -- Store A cashier (staff-main, scoped to Main Store) + Store A request → allowed.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 15,
+                             'sale', null, 'bbbbbbbb-0000-4000-8000-000000000001', 'l11-store-a-ok', null)
+    into v_res;
+  if (v_res ->> 'balance_after')::int <> 15 then
+    raise exception 'ASSERT: L11 Store A cashier at Store A was refused: %', v_res;
+  end if;
+
+  -- Store A cashier + Store B request → rejected (already covered by L3, repeated
+  -- here so this case is a self-contained proof of the full required matrix).
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 15,
+                                'sale', null, 'bbbbbbbb-0000-4000-8000-000000000002', 'l11-store-b-reject', null);
+    raise exception 'ASSERT: L11 Store A cashier awarded at Store B';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Store A cashier + NULL store → rejected (the bug this case exists to prove
+  -- is fixed: previously a null p_store_id silently skipped scoping entirely).
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 15,
+                                'sale', null, null, 'l11-null-store-reject', null);
+    raise exception 'ASSERT: L11 store-scoped cashier awarded business-wide via a null store_id';
+  exception when invalid_parameter_value then
+    if position('store_required' in SQLERRM) = 0 then
+      raise exception 'ASSERT: L11 wrong rejection reason for null store: %', SQLERRM;
+    end if;
+  end;
+  if public.point_balance(v_mem) <> 15 then
+    raise exception 'ASSERT: L11 balance moved despite the null-store award being refused';
+  end if;
+
+  -- Business-wide manager omitting p_store_id entirely still works (managers
+  -- are not store-scoped, so this must remain unaffected by the fix).
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 25,
+                             'sale', null, null, 'l11-manager-null-store-ok', null)
+    into v_res;
+  if (v_res ->> 'balance_after')::int <> 40 then
+    raise exception 'ASSERT: L11 manager award without a store_id failed: %', v_res;
+  end if;
+
+  -- Cross-tenant access remains impossible regardless of store_id.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem, 15, 'manual', null, null, 'l11-cross-tenant', null);
+    raise exception 'ASSERT: L11 cross-tenant owner awarded points';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
 end $$;
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -1642,6 +1709,19 @@ begin
       '[{"method":"bitcoin","amount_paise":10000}]'::jsonb, null, 0, 'sa5-method');
     raise exception 'ASSERT: SA5 invalid payment method accepted';
   exception when invalid_parameter_value then null;
+  end;
+
+  -- 'points' is a valid payment_method ENUM member (used by sale_payments'
+  -- historical shape) but create_sale never debits the ledger for it, so it
+  -- must be refused rather than silently accepted as a free line of credit.
+  begin
+    perform public.create_sale('bbbbbbbb-0000-4000-8000-000000000001',
+      '[{"name":"x","qty":1,"unit_price_paise":10000}]'::jsonb,
+      '[{"method":"points","amount_paise":10000}]'::jsonb, null, 0, 'sa5-points-payment');
+    raise exception 'ASSERT: SA5 points accepted as a sale payment method';
+  exception when invalid_parameter_value then
+    v_msg := SQLERRM;
+    if position('invalid_payment_method' in v_msg) = 0 then raise exception 'ASSERT: SA5 wrong message for points payment %', v_msg; end if;
   end;
 
   begin
@@ -2054,8 +2134,19 @@ begin
   select public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001',
     'cccccccc-0000-4000-8000-000000000001', 25, 'Supplier delivery', 'inv4-receive') into v_res;
   if (v_res ->> 'balance_after')::int <> 142 then raise exception 'ASSERT: INV4 receive balance wrong: %', v_res; end if;
+  -- `replayed` must be a genuine JSON boolean, not a stringified "false" —
+  -- ::boolean would cast either representation the same way, so this checks
+  -- jsonb_typeof directly (regression for the replayed-as-string bug: a JS
+  -- caller doing Boolean(row.replayed) treats the string "false" as truthy).
+  if jsonb_typeof(v_res -> 'replayed') <> 'boolean' then
+    raise exception 'ASSERT: INV4 receive replayed is not a JSON boolean: %', v_res;
+  end if;
+  if (v_res ->> 'replayed')::boolean then raise exception 'ASSERT: INV4 fresh receive flagged as replay'; end if;
   select public.receive_stock('bbbbbbbb-0000-4000-8000-000000000001',
     'cccccccc-0000-4000-8000-000000000001', 25, 'Supplier delivery', 'inv4-receive') into v_res;
+  if jsonb_typeof(v_res -> 'replayed') <> 'boolean' then
+    raise exception 'ASSERT: INV4 replayed receive replayed is not a JSON boolean: %', v_res;
+  end if;
   if not (v_res ->> 'replayed')::boolean then raise exception 'ASSERT: INV4 receive replay not flagged'; end if;
 
   select count(*) into v_n from public.inventory_movements where idempotency_key = 'inv4-receive';
@@ -2081,6 +2172,9 @@ begin
   select public.adjust_stock('bbbbbbbb-0000-4000-8000-000000000001',
     'cccccccc-0000-4000-8000-000000000001', -5, 'Damaged in transit', 'inv4-adjust') into v_res;
   if (v_res ->> 'balance_after')::int <> 137 then raise exception 'ASSERT: INV4 adjust balance wrong: %', v_res; end if;
+  if jsonb_typeof(v_res -> 'replayed') <> 'boolean' then
+    raise exception 'ASSERT: INV4 adjust replayed is not a JSON boolean: %', v_res;
+  end if;
 
   -- cannot adjust below available stock
   begin
@@ -2869,6 +2963,80 @@ begin
   execute 'reset role';
 end $$;
 
+-- CASE: RE10 redemption authorization — store-scoped staff cannot bypass
+-- store confinement by omitting p_store_id (regression for the store-scoping
+-- bypass fix)
+do $$
+declare
+  v_mem_a uuid; v_mem_b uuid; v_mem_c uuid; v_mem_d uuid; v_res jsonb;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE10 Member A', 'active') returning id into v_mem_a;
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE10 Member B', 'active') returning id into v_mem_b;
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE10 Member C', 'active') returning id into v_mem_c;
+  insert into public.customer_memberships (business_id, profile_id, display_name, status)
+  values ('aaaaaaaa-0000-4000-8000-000000000001', null, 'RE10 Member D', 'active') returning id into v_mem_d;
+
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem_a, 100, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're10-fund-a', 'RE10 fixture funding');
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem_b, 100, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're10-fund-b', 'RE10 fixture funding');
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem_c, 100, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're10-fund-c', 'RE10 fixture funding');
+  perform public.award_points('aaaaaaaa-0000-4000-8000-000000000001', v_mem_d, 100, 'manual', null,
+    'bbbbbbbb-0000-4000-8000-000000000001', 're10-fund-d', 'RE10 fixture funding');
+
+  -- Store A cashier (staff-main, scoped to Main Store) + Store A request → allowed.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem_a,
+    'bbbbbbbb-0000-4000-8000-000000000001', 1, 're10-store-a-ok') into v_res;
+  if v_res ->> 'status' <> 'pending' then raise exception 'ASSERT: RE10 Store A cashier at Store A refused: %', v_res; end if;
+
+  -- Store A cashier + Store B request → rejected.
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem_b,
+      'bbbbbbbb-0000-4000-8000-000000000002', 1, 're10-store-b-reject');
+    raise exception 'ASSERT: RE10 Store A cashier redeemed at Store B';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Store A cashier + NULL store → rejected (the bug this case exists to prove
+  -- is fixed).
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem_c, null, 1, 're10-null-store-reject');
+    raise exception 'ASSERT: RE10 store-scoped cashier redeemed business-wide via a null store_id';
+  exception when invalid_parameter_value then
+    if position('store_required' in SQLERRM) = 0 then
+      raise exception 'ASSERT: RE10 wrong rejection reason for null store: %', SQLERRM;
+    end if;
+  end;
+  if exists (select 1 from public.redemptions where idempotency_key = 're10-null-store-reject') then
+    raise exception 'ASSERT: RE10 a redemption was persisted despite the null-store rejection';
+  end if;
+
+  -- Business-wide manager omitting p_store_id entirely still works (managers
+  -- are not store-scoped, so this must remain unaffected by the fix).
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem_d, null, 1, 're10-manager-null-store-ok')
+    into v_res;
+  if v_res ->> 'status' <> 'pending' then raise exception 'ASSERT: RE10 manager redeem without a store_id failed: %', v_res; end if;
+
+  -- Cross-tenant access remains impossible regardless of store_id.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.redeem_reward('dddddddd-0000-4000-8000-000000000003', v_mem_a, null, 1, 're10-cross-tenant');
+    raise exception 'ASSERT: RE10 cross-tenant owner redeemed Ambika reward';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+end $$;
+
 -- ============================================================================
 -- MVP LAUNCH PART A §3 — secure membership QR tokens + POS verification
 -- ============================================================================
@@ -3165,6 +3333,46 @@ begin
   perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
   select count(*) into v_seen from public.qr_verification_attempts;
   if v_seen <> 0 then raise exception 'ASSERT: staff can read scan attempts (%)', v_seen; end if;
+end $$;
+
+-- CASE: QR9 verify — store-scoped cashier cannot bypass store confinement by
+-- omitting p_store_id (regression for the store-scoping bypass fix)
+set local role authenticated;
+do $$
+declare v_token text; v_selector text; v_res jsonb; v_consumed timestamptz;
+begin
+  -- Store A cashier (staff-main) + NULL store → rejected, and the token must
+  -- survive the denial (a denied scan must never consume it).
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  v_token := public.issue_membership_qr_token() ->> 'token';
+  v_selector := split_part(v_token, '.', 2);
+
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, null);
+  if v_res ->> 'reason' <> 'store_required' then
+    raise exception 'ASSERT: QR9 store-scoped cashier verified business-wide via a null store_id: %', v_res;
+  end if;
+
+  set local role postgres;
+  select consumed_at into v_consumed from public.membership_qr_tokens where selector = v_selector;
+  if v_consumed is not null then raise exception 'ASSERT: QR9 the null-store denial consumed the token'; end if;
+  set local role authenticated;
+
+  -- ...but the SAME cashier at their OWN store still succeeds (Store A + Store A).
+  v_res := public.verify_membership_qr_token(v_token, 'bbbbbbbb-0000-4000-8000-000000000001');
+  if (v_res ->> 'ok')::boolean is not true then
+    raise exception 'ASSERT: QR9 store-scoped cashier refused at their own store: %', v_res;
+  end if;
+
+  -- Business-wide manager omitting p_store_id entirely still works (managers
+  -- are not store-scoped, so this must remain unaffected by the fix).
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  v_token := public.issue_membership_qr_token() ->> 'token';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  v_res := public.verify_membership_qr_token(v_token, null);
+  if (v_res ->> 'ok')::boolean is not true then
+    raise exception 'ASSERT: QR9 manager verify without a store_id failed: %', v_res;
+  end if;
 end $$;
 
 -- CASE: LR1 rule engine — every business starts on the launch policy, and history is stamped
@@ -4375,4 +4583,444 @@ begin
     raise exception 'ASSERT: the rule immutability trigger stopped firing';
   exception when insufficient_privilege then null;
   end;
+end $$;
+
+-- CASE: WL1 wishlist — own bookmarks only, membership+reward existence enforced, no cross-tenant/API leakage
+do $$
+declare
+  v_biz uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  v_reward uuid; v_res jsonb; v_item uuid; v_n int;
+begin
+  execute 'reset role';
+  select id into v_reward from public.rewards
+   where business_id = v_biz and status = 'active' order by points_cost limit 1;
+
+  -- Rahul (an active member of this business) can save a reward for later.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select public.add_to_wishlist(v_biz, v_reward) into v_res;
+  v_item := (v_res ->> 'id')::uuid;
+
+  select count(*) into v_n from public.wishlist_items where id = v_item;
+  if v_n <> 1 then raise exception 'ASSERT: owner cannot see their own wishlist row'; end if;
+
+  -- A reward that doesn't exist (or isn't this business's) is rejected.
+  begin
+    perform public.add_to_wishlist(v_biz, gen_random_uuid());
+    raise exception 'ASSERT: wishlisted a reward outside this business';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- Someone who owns/staffs a different business but holds no membership
+  -- here cannot bookmark this business's reward for themselves.
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  begin
+    perform public.add_to_wishlist(v_biz, v_reward);
+    raise exception 'ASSERT: non-member wishlisted a reward';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Cross-profile isolation: they cannot see Rahul's saved reward either.
+  select count(*) into v_n from public.wishlist_items where id = v_item;
+  if v_n <> 0 then raise exception 'ASSERT: cross-profile wishlist visibility'; end if;
+
+  -- They cannot remove Rahul's bookmark either — remove_from_wishlist is
+  -- scoped to auth.uid(), so this is a silent no-op, not an error. Checked
+  -- as the table owner (bypassing RLS) since a non-owner can never see the
+  -- row to begin with, RLS or no RLS.
+  perform public.remove_from_wishlist(v_reward);
+  execute 'reset role';
+  select count(*) into v_n from public.wishlist_items where id = v_item;
+  if v_n <> 1 then raise exception 'ASSERT: a non-owner deleted someone else''s wishlist row'; end if;
+  execute 'set local role authenticated';
+
+  -- Rahul can remove his own bookmark.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  perform public.remove_from_wishlist(v_reward);
+  select count(*) into v_n from public.wishlist_items where id = v_item;
+  if v_n <> 0 then raise exception 'ASSERT: remove_from_wishlist did not take effect'; end if;
+
+  -- Direct table writes are not granted at all — every write must go
+  -- through the RPCs above.
+  begin
+    insert into public.wishlist_items (profile_id, business_id, reward_id)
+    values ('55555555-5555-4555-8555-555555555555', v_biz, v_reward);
+    raise exception 'ASSERT: direct INSERT on wishlist_items is granted to authenticated';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- anon has no privilege on the table at all.
+  execute 'reset role';
+  execute 'set local role anon';
+  begin
+    perform 1 from public.wishlist_items limit 1;
+    raise exception 'ASSERT: anon could read wishlist_items';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: RF1 referrals — staff-recorded link, self/duplicate/unknown-code rejected, bonus fires once on the referred member's first sale
+do $$
+declare
+  v_biz uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  v_store uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
+  v_referrer uuid; v_referrer_no text; v_referred uuid; v_other uuid;
+  v_res jsonb; v_referral_id uuid; v_n int; v_balance int;
+begin
+  execute 'reset role';
+  insert into public.customer_memberships (business_id, display_name, enrolled_store_id)
+  values (v_biz, 'RF1 Referrer', v_store) returning id, membership_no into v_referrer, v_referrer_no;
+  insert into public.customer_memberships (business_id, display_name, enrolled_store_id)
+  values (v_biz, 'RF1 Referred', v_store) returning id into v_referred;
+  insert into public.customer_memberships (business_id, display_name, enrolled_store_id)
+  values (v_biz, 'RF1 Other', v_store) returning id into v_other;
+
+  -- Staff link the code the referrer was given to the member they just enrolled.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.record_referral(v_biz, v_referred, v_referrer_no) into v_res;
+  v_referral_id := (v_res ->> 'referral_id')::uuid;
+
+  -- A member cannot be their own referrer.
+  begin
+    perform public.record_referral(v_biz, v_referrer, v_referrer_no);
+    raise exception 'ASSERT: self-referral accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- An unknown code is rejected.
+  begin
+    perform public.record_referral(v_biz, v_other, 'AE-NOSUCHCODE');
+    raise exception 'ASSERT: unknown referral code accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- The same member cannot be credited as "referred" twice.
+  begin
+    perform public.record_referral(v_biz, v_referred, v_referrer_no);
+    raise exception 'ASSERT: duplicate referral accepted';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- A plain customer (not business staff) cannot record referrals.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.record_referral(v_biz, v_other, v_referrer_no);
+    raise exception 'ASSERT: a non-staff customer recorded a referral';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+  select count(*) into v_n from public.referrals where id = v_referral_id and status = 'pending';
+  if v_n <> 1 then raise exception 'ASSERT: referral row missing or not pending'; end if;
+
+  -- The referred member's first sale fires the bonus — once.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  perform public.create_sale(
+    v_store, '[{"name":"LED bulb 9W","qty":1,"unit_price_paise":15000}]'::jsonb,
+    '[{"method":"cash","amount_paise":15000}]'::jsonb, v_referred, 0, 'rf1-first-sale'
+  );
+  execute 'reset role';
+
+  select count(*) into v_n from public.referrals where id = v_referral_id and status = 'completed' and completed_at is not null;
+  if v_n <> 1 then raise exception 'ASSERT: referral was not marked completed after the first sale'; end if;
+
+  select current_points into v_balance from public.customer_points_balance where customer_membership_id = v_referrer;
+  if coalesce(v_balance, 0) <> 200 then raise exception 'ASSERT: referrer bonus wrong, balance = %', v_balance; end if;
+
+  select count(*) into v_n from public.points_ledger
+   where customer_membership_id = v_referrer and source_type = 'referral' and points = 200;
+  if v_n <> 1 then raise exception 'ASSERT: referral bonus ledger entry missing or duplicated'; end if;
+
+  -- A second sale by the same (already-credited) member does not re-fire the bonus.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  perform public.create_sale(
+    v_store, '[{"name":"LED bulb 9W","qty":1,"unit_price_paise":15000}]'::jsonb,
+    '[{"method":"cash","amount_paise":15000}]'::jsonb, v_referred, 0, 'rf1-second-sale'
+  );
+  execute 'reset role';
+
+  select count(*) into v_n from public.points_ledger
+   where customer_membership_id = v_referrer and source_type = 'referral';
+  if v_n <> 1 then raise exception 'ASSERT: a second sale re-fired the referral bonus'; end if;
+
+  -- Direct writes and cross-tenant execution are not available.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    insert into public.referrals (business_id, referrer_membership_id, referred_membership_id)
+    values (v_biz, v_referrer, v_other);
+    raise exception 'ASSERT: direct INSERT on referrals is granted to authenticated';
+  exception when insufficient_privilege then null;
+  end;
+
+  execute 'reset role';
+  execute 'set local role anon';
+  begin
+    perform 1 from public.referrals limit 1;
+    raise exception 'ASSERT: anon could read referrals';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: CH1 challenges — manager-only authoring, live progress with no cache, one-time award on threshold cross
+do $$
+declare
+  v_biz uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  v_store uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
+  v_mem uuid; v_res jsonb; v_ch_id uuid; v_progress numeric; v_n int; v_balance int; v_list jsonb;
+  v_balance_before_sale2 int; v_sale2_points int; v_ledger_challenge_sum int;
+begin
+  execute 'reset role';
+  insert into public.customer_memberships (business_id, display_name, enrolled_store_id)
+  values (v_biz, 'CH1 Member', v_store) returning id into v_mem;
+
+  -- A non-manager staff member cannot publish a challenge.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.create_challenge(v_biz, 'Staff-made challenge', null, 'purchases', 2, 100, now() + interval '30 days');
+    raise exception 'ASSERT: non-manager staff published a challenge';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- The manager can.
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.create_challenge(v_biz, 'Buy 3 products', 'Buy 3 products this month', 'products', 3, 150, now() + interval '30 days') into v_res;
+  v_ch_id := (v_res ->> 'challenge_id')::uuid;
+
+  -- A plain customer cannot end it.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.end_challenge(v_ch_id);
+    raise exception 'ASSERT: a customer ended a challenge';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- Progress starts at zero — nothing purchased yet.
+  select public.challenge_progress(v_ch_id, v_mem) into v_progress;
+  if v_progress <> 0 then raise exception 'ASSERT: fresh member already has challenge progress'; end if;
+
+  -- A sale of 2 units doesn't cross the target of 3 — no award yet.
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  perform public.create_sale(
+    v_store, '[{"name":"LED bulb 9W","qty":2,"unit_price_paise":15000}]'::jsonb,
+    '[{"method":"cash","amount_paise":30000}]'::jsonb, v_mem, 0, 'ch1-sale-1'
+  );
+  execute 'reset role';
+  select count(*) into v_n from public.challenge_completions where challenge_id = v_ch_id and customer_membership_id = v_mem;
+  if v_n <> 0 then raise exception 'ASSERT: challenge awarded before the target was reached'; end if;
+  select coalesce(current_points, 0) into v_balance_before_sale2 from public.customer_points_balance where customer_membership_id = v_mem;
+
+  -- A second sale crosses 3 products total — the bonus fires, once. The
+  -- balance must go up by exactly this sale's own earn PLUS the challenge
+  -- bonus — not a hard-coded number, since the business's loyalty rate is
+  -- whatever it happens to be by this point in the suite.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  select public.create_sale(
+    v_store, '[{"name":"LED bulb 9W","qty":2,"unit_price_paise":15000}]'::jsonb,
+    '[{"method":"cash","amount_paise":30000}]'::jsonb, v_mem, 0, 'ch1-sale-2'
+  ) into v_res;
+  v_sale2_points := (v_res -> 'points' ->> 'total')::int;
+  execute 'reset role';
+
+  select count(*) into v_n from public.challenge_completions where challenge_id = v_ch_id and customer_membership_id = v_mem;
+  if v_n <> 1 then raise exception 'ASSERT: challenge was not credited after crossing the target'; end if;
+  select coalesce(current_points, 0) into v_balance from public.customer_points_balance where customer_membership_id = v_mem;
+  if v_balance <> v_balance_before_sale2 + v_sale2_points + 150 then
+    raise exception 'ASSERT: challenge reward points wrong — before %, sale earned %, after % (expected +150 on top)',
+      v_balance_before_sale2, v_sale2_points, v_balance;
+  end if;
+  select coalesce(sum(points), 0) into v_ledger_challenge_sum from public.points_ledger
+   where customer_membership_id = v_mem and source_type = 'challenge';
+  if v_ledger_challenge_sum <> 150 then
+    raise exception 'ASSERT: challenge ledger entry missing or duplicated, sum = %', v_ledger_challenge_sum;
+  end if;
+
+  -- A third, unnecessary sale must not re-fire the already-claimed bonus.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  perform public.create_sale(
+    v_store, '[{"name":"LED bulb 9W","qty":1,"unit_price_paise":15000}]'::jsonb,
+    '[{"method":"cash","amount_paise":15000}]'::jsonb, v_mem, 0, 'ch1-sale-3'
+  );
+  execute 'reset role';
+  select count(*) into v_n from public.points_ledger where customer_membership_id = v_mem and source_type = 'challenge';
+  if v_n <> 1 then raise exception 'ASSERT: a later sale re-fired an already-claimed challenge bonus'; end if;
+
+  -- The member's own read shows the challenge as completed with full progress.
+  -- (CH1 Member has no profile_id of its own, and Rahul/Priya already have a
+  -- linked membership in this business — so link it to 99999999, who has
+  -- none here, purely to exercise my_challenges() as a real signed-in customer.)
+  execute 'reset role';
+  update public.customer_memberships set profile_id = '99999999-9999-4999-8999-999999999999' where id = v_mem;
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  select public.my_challenges() into v_list;
+  if not exists (
+    select 1 from jsonb_array_elements(v_list) e
+     where (e ->> 'id')::uuid = v_ch_id and (e ->> 'completed')::boolean and (e ->> 'progress')::numeric >= 3
+  ) then
+    raise exception 'ASSERT: my_challenges() did not report this member''s completed challenge: %', v_list;
+  end if;
+
+  -- Staff-facing rollup: at least one participant, averaging a completed run.
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.list_business_challenges(v_biz) into v_list;
+  if not exists (
+    select 1 from jsonb_array_elements(v_list) e
+     where (e ->> 'id')::uuid = v_ch_id and (e ->> 'participants')::int >= 1
+  ) then
+    raise exception 'ASSERT: list_business_challenges() missing the participant: %', v_list;
+  end if;
+
+  -- A plain customer cannot call the staff rollup.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.list_business_challenges(v_biz);
+    raise exception 'ASSERT: a customer read the staff challenge rollup';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- anon has no privilege at all.
+  execute 'reset role';
+  execute 'set local role anon';
+  begin
+    perform 1 from public.challenges limit 1;
+    raise exception 'ASSERT: anon could read challenges';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: CM1 campaigns — manager-only authoring and status changes, drafts hidden from customers, anon denied
+do $$
+declare
+  v_biz uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  v_res jsonb; v_draft_id uuid; v_active_id uuid; v_n int; v_status text;
+begin
+  -- A non-manager staff member cannot publish a campaign.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}', true);
+  begin
+    perform public.create_campaign(v_biz, 'Staff campaign', null, 'All members', '2X points', 'draft', now(), now() + interval '7 days');
+    raise exception 'ASSERT: non-manager staff published a campaign';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- The manager can create a draft and a live one.
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  select public.create_campaign(v_biz, 'CM1 Draft', 'not yet live', 'All members', '2X points', 'draft', now(), now() + interval '7 days') into v_res;
+  v_draft_id := (v_res ->> 'campaign_id')::uuid;
+  select public.create_campaign(v_biz, 'CM1 Active', 'live now', 'All members', '3X points on Lighting', 'active', now(), now() + interval '7 days') into v_res;
+  v_active_id := (v_res ->> 'campaign_id')::uuid;
+
+  -- An invalid status at creation is rejected (only draft/active are startable states).
+  begin
+    perform public.create_campaign(v_biz, 'CM1 Bad', null, 'All members', '2X points', 'ended', now(), now() + interval '7 days');
+    raise exception 'ASSERT: a campaign was created directly in ended status';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- Rahul, a plain customer of this business, sees the active campaign but not the draft.
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  select count(*) into v_n from public.campaigns where id = v_active_id;
+  if v_n <> 1 then raise exception 'ASSERT: a customer cannot see an active campaign'; end if;
+  select count(*) into v_n from public.campaigns where id = v_draft_id;
+  if v_n <> 0 then raise exception 'ASSERT: a customer can see another business''s draft campaign'; end if;
+
+  -- A customer cannot end a campaign.
+  begin
+    perform public.set_campaign_status(v_active_id, 'ended');
+    raise exception 'ASSERT: a customer ended a campaign';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- The manager can end it.
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.set_campaign_status(v_active_id, 'ended');
+  execute 'reset role';
+  select status into v_status from public.campaigns where id = v_active_id;
+  if v_status <> 'ended' then raise exception 'ASSERT: set_campaign_status did not take effect: %', v_status; end if;
+
+  -- Direct writes are not granted at all.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  begin
+    insert into public.campaigns (business_id, name, audience, reward, starts_at, ends_at)
+    values (v_biz, 'Direct insert', 'All members', '2X points', now(), now() + interval '7 days');
+    raise exception 'ASSERT: direct INSERT on campaigns is granted to authenticated';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- anon has no privilege at all.
+  execute 'reset role';
+  execute 'set local role anon';
+  begin
+    perform 1 from public.campaigns limit 1;
+    raise exception 'ASSERT: anon could read campaigns';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
+end $$;
+
+-- CASE: INV6 product barcode — unique per business, clearable, rejected when it collides
+do $$
+declare
+  v_biz uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  v_res jsonb; v_p1 uuid; v_p2 uuid; v_barcode text;
+begin
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+
+  select public.create_product(v_biz, 'INV6 Product One', 'inv6-sku-1', 10000, null, null, null, 'piece', null, '[]'::jsonb, '8901234500001') into v_res;
+  v_p1 := (v_res ->> 'product_id')::uuid;
+  if (v_res ->> 'barcode') <> '8901234500001' then raise exception 'ASSERT: barcode not returned on create: %', v_res; end if;
+
+  -- A second product cannot reuse the same barcode.
+  begin
+    perform public.create_product(v_biz, 'INV6 Product Two', 'inv6-sku-2', 10000, null, null, null, 'piece', null, '[]'::jsonb, '8901234500001');
+    raise exception 'ASSERT: duplicate barcode accepted on create';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- A second product with a different barcode is fine.
+  select public.create_product(v_biz, 'INV6 Product Two', 'inv6-sku-2', 10000, null, null, null, 'piece', null, '[]'::jsonb, '8901234500002') into v_res;
+  v_p2 := (v_res ->> 'product_id')::uuid;
+
+  -- Cannot update product two's barcode to collide with product one's.
+  begin
+    perform public.update_product(v_p2, null, null, null, null, null, null, null, null, '8901234500001');
+    raise exception 'ASSERT: update_product allowed a colliding barcode';
+  exception when invalid_parameter_value then null;
+  end;
+
+  -- Clearing a barcode (empty string) works and frees it up for reuse elsewhere.
+  perform public.update_product(v_p1, null, null, null, null, null, null, null, null, '');
+  execute 'reset role';
+  select barcode into v_barcode from public.products where id = v_p1;
+  if v_barcode is not null then raise exception 'ASSERT: barcode was not cleared, got %', v_barcode; end if;
+
+  -- Now product two can take the freed-up barcode.
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}', true);
+  perform public.update_product(v_p2, null, null, null, null, null, null, null, null, '8901234500001');
+  execute 'reset role';
+  select barcode into v_barcode from public.products where id = v_p2;
+  if v_barcode <> '8901234500001' then raise exception 'ASSERT: freed barcode was not reassigned, got %', v_barcode; end if;
+
+  -- A customer cannot create a product with a barcode either (same manager-only gate).
+  execute 'set local role authenticated';
+  perform set_config('request.jwt.claims', '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}', true);
+  begin
+    perform public.create_product(v_biz, 'INV6 Customer attempt', 'inv6-sku-3', 10000, null, null, null, 'piece', null, '[]'::jsonb, '8901234500009');
+    raise exception 'ASSERT: a customer created a product with a barcode';
+  exception when insufficient_privilege then null;
+  end;
+  execute 'reset role';
 end $$;

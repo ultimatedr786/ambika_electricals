@@ -39,31 +39,28 @@ export default function RedemptionsPage() {
     .filter((r) => groups[tab].includes(r.status));
 
   return (
-    <div className="space-y-5">
-      <PageHeader title="My redemptions" description="Track every reward you've unlocked." />
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <PageHeader title="My redemptions" description="Track every reward you've unlocked." />
 
+        {!isSupabaseConfigured() && (
+          <Tabs value={tab} onValueChange={setTab}>
+            <TabsList className="w-full overflow-x-auto no-scrollbar sm:w-auto">
+              <TabsTrigger value="active">Active</TabsTrigger>
+              <TabsTrigger value="completed">Completed</TabsTrigger>
+              <TabsTrigger value="expired">Expired</TabsTrigger>
+              <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-region space-y-4 p-1">
       {/* Live Supabase redemption history — renders only when auth is configured */}
       <LiveRedemptionsPanel />
 
-      {isSupabaseConfigured() && (
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-muted-foreground">Prototype history</h2>
-          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Demo data — migrates in a later slice
-          </span>
-        </div>
-      )}
-
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="w-full overflow-x-auto no-scrollbar sm:w-auto">
-          <TabsTrigger value="active">Active</TabsTrigger>
-          <TabsTrigger value="completed">Completed</TabsTrigger>
-          <TabsTrigger value="expired">Expired</TabsTrigger>
-          <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
-        </TabsList>
-      </Tabs>
-
-      {list.length === 0 ? (
+      {!isSupabaseConfigured() && (
+      list.length === 0 ? (
         <EmptyState
           icon={Gift}
           title="Nothing here yet"
@@ -107,7 +104,9 @@ export default function RedemptionsPage() {
             </motion.div>
           ))}
         </div>
+      )
       )}
+      </div>
 
       <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
         <DialogContent className="max-w-sm">

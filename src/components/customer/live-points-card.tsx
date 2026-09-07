@@ -1,12 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { BadgeCheck, Gift, Receipt, Sparkles, SlidersHorizontal, TrendingUp } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { BadgeCheck, Gift, Receipt, SlidersHorizontal, TrendingUp } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import { TierBadge } from "@/components/shared/tier-badge";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/auth/env";
-import { relativeTime } from "@/lib/utils";
+import { tierProgress } from "@/lib/points";
+import { formatNumber, relativeTime } from "@/lib/utils";
 
 /**
  * Live points card (Step 3 Slices 1–2) — real Supabase loyalty data for the
@@ -214,14 +216,9 @@ export function LivePointsCard() {
             <BadgeCheck className="size-4.5" aria-hidden />
           </span>
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold">
-              Live membership
-              <Badge variant="outline" className="gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden /> Supabase
-              </Badge>
-            </h2>
+            <h2 className="text-sm font-semibold">Membership</h2>
             <p className="text-xs text-muted-foreground">
-              No live membership linked to your account yet — ask staff to enrol you at checkout and your
+              No membership linked to your account yet — ask staff to enrol you at checkout and your
               real balance will appear here.
             </p>
           </div>
@@ -232,38 +229,63 @@ export function LivePointsCard() {
 
   return (
     <div className="space-y-4">
-      {memberships.map((m) => (
-        <Card key={m.id}>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                <Sparkles className="size-4" aria-hidden />
-              </span>
-              Live points
-              <Badge variant="outline" className="gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden /> Supabase
-              </Badge>
-              <span className="ml-auto font-mono text-xs font-normal text-muted-foreground">{m.membershipNo}</span>
-            </CardTitle>
-            <p className="text-xs text-muted-foreground">
-              {m.businessName} · {describeRule(m.rule)}
-              {m.rule && <span className="ml-1 opacity-70">(rule v{m.rule.version})</span>}
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-xl bg-muted/40 p-3 text-center">
-                <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Balance</p>
-                <p className="text-xl font-semibold">{m.balance?.current ?? 0} pts</p>
-                <p className="text-[11px] text-muted-foreground">
-                  ≈ ₹{rupees((m.balance?.current ?? 0) * (m.rule?.pointValuePaise ?? 10))}
+      {memberships.map((m) => {
+        const current = m.balance?.current ?? 0;
+        const earned = m.balance?.earned ?? 0;
+        const pointValue = m.rule?.pointValuePaise ?? 10;
+        const progress = tierProgress(earned);
+        return (
+        <div key={m.id} className="space-y-4">
+          <div className="group relative overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-br from-slate-900 via-slate-950 to-black p-5 text-white shadow-lg transition-shadow duration-300 hover:shadow-xl hover:shadow-amber-500/10 sm:p-6">
+            <div
+              className="pointer-events-none absolute -bottom-14 -left-14 size-52 rounded-full bg-amber-400/0 blur-3xl transition-colors duration-500 group-hover:bg-amber-400/25"
+              aria-hidden
+            />
+            <div
+              className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/10 to-transparent transition-transform duration-700 ease-out group-hover:translate-x-full"
+              aria-hidden
+            />
+
+            <div className="relative flex items-start justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-white/60">Available points</p>
+                <p className="mt-1.5 text-[40px] font-semibold leading-none tabular sm:text-5xl">
+                  {formatNumber(current)}<span className="ml-1.5 text-base font-normal text-white/60">pts</span>
+                </p>
+                <p className="mt-2 text-sm text-white/70">
+                  Worth ₹{rupees(current * pointValue)} in electrical rewards
                 </p>
               </div>
+              <TierBadge tier={progress.current.name} className="bg-white/15 text-white" />
+            </div>
+
+            <div className="relative mt-5">
+              <div className="mb-1.5 flex items-center justify-between text-[13px]">
+                <span className="text-white/70">
+                  {progress.next ? `${formatNumber(progress.pointsToNext)} points to ${progress.next.name}` : "Top tier reached"}
+                </span>
+                <span className="font-medium text-white/90">{progress.percent}%</span>
+              </div>
+              <Progress
+                value={progress.percent}
+                className="h-1.5 bg-white/15"
+                indicatorClassName="bg-gradient-to-r from-amber-400 to-amber-300"
+              />
+            </div>
+
+            <p className="relative mt-4 text-xs text-white/50">
+              {m.businessName} · {m.membershipNo}
+            </p>
+          </div>
+
+          <Card>
+          <CardContent className="space-y-4 pt-5">
+            <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl bg-muted/40 p-3 text-center">
                 <p className="flex items-center justify-center gap-1 text-[11px] uppercase tracking-wider text-muted-foreground">
                   <TrendingUp className="size-3" aria-hidden /> Lifetime earned
                 </p>
-                <p className="text-xl font-semibold">{m.balance?.earned ?? 0}</p>
+                <p className="text-xl font-semibold">{earned}</p>
               </div>
               <div className="rounded-xl bg-muted/40 p-3 text-center">
                 <p className="flex items-center justify-center gap-1 text-[11px] uppercase tracking-wider text-muted-foreground">
@@ -272,6 +294,7 @@ export function LivePointsCard() {
                 <p className="text-xl font-semibold">{m.balance?.redeemed ?? 0}</p>
               </div>
             </div>
+            <p className="text-xs text-muted-foreground">{describeRule(m.rule)}</p>
 
             {m.entries.length > 0 && (
               <ul className="divide-y rounded-xl border">
@@ -309,8 +332,10 @@ export function LivePointsCard() {
               </ul>
             )}
           </CardContent>
-        </Card>
-      ))}
+          </Card>
+        </div>
+        );
+      })}
     </div>
   );
 }

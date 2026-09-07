@@ -22,12 +22,12 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { ProductArt } from "@/components/shared/product-art";
 import { QRScanner } from "@/components/business/qr-scanner";
 import { CustomerSelector } from "@/components/business/customer-selector";
+import { LivePosPanel } from "@/components/business/live-pos-panel";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { calculatePoints } from "@/lib/points";
 import { productCategories } from "@/lib/mock-data/products";
 import { cn, formatINR, formatNumber, initials } from "@/lib/utils";
-import { LivePosPanel } from "@/components/business/live-pos-panel";
 import { isSupabaseConfigured } from "@/lib/auth/env";
 import type { Customer, Product, Sale } from "@/types";
 
@@ -223,29 +223,28 @@ export default function NewSalePage() {
   );
 
   return (
-    // Bottom padding clears the sticky summary bar + the mobile tab bar,
-    // so the sticky bar never covers cart rows or page content.
-    <div className="space-y-5 pb-[186px] lg:pb-0">
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Bottom padding clears the sticky summary bar + the mobile tab bar,
+          so the sticky bar never covers cart rows or page content. */}
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-region space-y-4 pb-[186px] pr-1 lg:pb-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Point of sale</p>
           <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">New sale</h1>
         </div>
-        <Button variant="ghost" size="sm" asChild><Link href="/business/sales"><X /> Cancel</Link></Button>
+        {!isSupabaseConfigured() && (
+          <Button variant="ghost" size="sm" asChild><Link href="/business/sales"><X /> Cancel</Link></Button>
+        )}
       </div>
 
-      {/* Live Supabase POS — renders only when auth is configured */}
-      <LivePosPanel />
+      <LivePosPanel
+        headerAction={
+          <Button variant="ghost" size="sm" asChild><Link href="/business/sales"><X /> Cancel</Link></Button>
+        }
+      />
 
-      {isSupabaseConfigured() && (
-        <div className="flex items-center gap-2 pt-1">
-          <h2 className="text-sm font-semibold text-muted-foreground">Prototype billing flow</h2>
-          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Demo data — product catalogue migrates in a later slice
-          </span>
-        </div>
-      )}
-
+      {!isSupabaseConfigured() && (
+      <>
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-5">
           {/* Step 1 — customer */}
@@ -443,6 +442,9 @@ export default function NewSalePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      </>
+      )}
+      </div>
     </div>
   );
 }

@@ -234,15 +234,8 @@ export function LiveTeamPanel() {
             <Users className="size-4.5" />
           </span>
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold">
-              Live team
-              <Badge variant="outline" className="gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden /> Supabase
-              </Badge>
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              {businessName ?? "Your business"} · signed-in membership data with database-enforced permissions
-            </p>
+            <h2 className="text-sm font-semibold">Team</h2>
+            <p className="text-xs text-muted-foreground">{businessName ?? "Your business"}</p>
           </div>
         </div>
         {isOwner && (

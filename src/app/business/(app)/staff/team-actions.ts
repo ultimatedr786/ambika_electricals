@@ -374,7 +374,7 @@ export async function setMemberStoreAction(
   if (!authed.ok) return authed.result;
   const { supabase } = authed;
 
-  const rpc = action === "assign" ? "assign_member_to_store" : "unassign_member_to_store";
+  const rpc = action === "assign" ? "assign_member_to_store" : "unassign_member_from_store";
   const { error } = await supabase.rpc(rpc, { p_store_id: storeId, p_profile_id: profileId });
   if (error) {
     const reason = classifyError(error);

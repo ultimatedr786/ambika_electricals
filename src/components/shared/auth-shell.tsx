@@ -84,7 +84,7 @@ export function AuthShell({
             </ul>
           </div>
 
-          <p className="text-xs text-white/40">Demo prototype · No real payments or accounts</p>
+          <p className="text-xs text-white/35 font-medium tracking-wide">Developed by <span className="text-white/55 font-semibold">NisuNex</span></p>
         </div>
       </aside>
 
@@ -98,7 +98,7 @@ export function AuthShell({
           <ThemeToggle />
         </div>
 
-        <div className="flex flex-1 items-center justify-center px-5 pb-10 pt-4 sm:px-8 lg:px-12">
+        <div className="flex flex-1 items-center justify-center px-5 pb-6 pt-4 sm:px-8 lg:px-12">
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -119,6 +119,11 @@ export function AuthShell({
             {children}
           </motion.div>
         </div>
+
+        <footer className="py-3 text-center text-[11px] text-muted-foreground">
+          <span>Developed by </span>
+          <span className="font-medium text-foreground/80">NisuNex</span>
+        </footer>
       </main>
     </div>
   );

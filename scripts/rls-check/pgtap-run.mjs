@@ -28,7 +28,13 @@ import pg from "pg";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const REAL_PGTAP = process.env.PGTAP_REAL === "1";
-const TEST_DB = process.env.RLS_DB_NAME || (REAL_PGTAP ? "pgtap_ci" : "pgtap_local");
+// Unique per process by default — see the identical comment in run.mjs.
+// Confirmed to actually race: two concurrent `npm run test:pgtap` runs
+// against the same server both target "pgtap_local" and one's
+// CREATE DATABASE collides with the other's ("duplicate key value violates
+// unique constraint pg_database_datname_index"). CI still gets a stable,
+// predictable name via PGTAP_REAL/RLS_DB_NAME since exactly one job uses it.
+const TEST_DB = process.env.RLS_DB_NAME || (REAL_PGTAP ? "pgtap_ci" : `pgtap_local_${process.pid}`);
 
 const PG = {
   host: process.env.PGHOST || "127.0.0.1",

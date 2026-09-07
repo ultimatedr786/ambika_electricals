@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Archive, ArchiveRestore, Minus, Package, PackagePlus, Search, TriangleAlert } from "lucide-react";
+import { Archive, ArchiveRestore, ImagePlus, LayoutGrid, List, Minus, Package, PackagePlus, Search, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,8 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { FormDialog } from "@/components/shared/form-dialog";
+import { CatalogueImage, useCatalogueImages } from "@/components/shared/catalogue-image";
+import { CatalogueImageUploader } from "@/components/shared/catalogue-image-uploader";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/auth/env";
 import { formatINR } from "@/lib/utils";
@@ -62,6 +64,8 @@ export function LiveInventoryPanel() {
   const [products, setProducts] = React.useState<LiveProduct[]>([]);
   const [stores, setStores] = React.useState<{ id: string; name: string }[]>([]);
   const [query, setQuery] = React.useState("");
+  const [category, setCategory] = React.useState("All");
+  const [view, setView] = React.useState<"table" | "grid">("grid");
   const [showArchived, setShowArchived] = React.useState(false);
 
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -72,6 +76,10 @@ export function LiveInventoryPanel() {
   const [stockDialog, setStockDialog] = React.useState<StockDialogState | null>(null);
   const [stockBusy, setStockBusy] = React.useState(false);
   const [busyProductId, setBusyProductId] = React.useState<string | null>(null);
+  const [photoDialogProduct, setPhotoDialogProduct] = React.useState<LiveProduct | null>(null);
+
+  const productIds = React.useMemo(() => products.map((p) => p.id), [products]);
+  const images = useCatalogueImages("product", productIds);
 
   const reload = React.useCallback(async () => {
     if (!configured || !supabase) {
@@ -161,8 +169,11 @@ export function LiveInventoryPanel() {
 
   const isManager = role === "owner" || role === "manager";
   const t = query.trim().toLowerCase();
+  const categories = ["All", ...Array.from(new Set(products.map((p) => p.category).filter((c): c is string => !!c))).sort()];
   const results = products.filter((p) => (showArchived ? true : p.status === "active"))
+    .filter((p) => category === "All" || p.category === category)
     .filter((p) => !t || `${p.name} ${p.sku} ${p.category ?? ""}`.toLowerCase().includes(t));
+  const totalStock = (p: LiveProduct) => Array.from(p.stock.values()).reduce((s, v) => s + v.onHand, 0);
 
   const submitCreate = async () => {
     const pricePaise = Math.round(Number.parseFloat(createForm.price) * 100);
@@ -256,14 +267,9 @@ export function LiveInventoryPanel() {
             <Package className="size-4.5" />
           </span>
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold">
-              Live catalogue &amp; stock
-              <Badge variant="outline" className="gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden /> Supabase
-              </Badge>
-            </h2>
+            <h2 className="text-sm font-semibold">Products</h2>
             <p className="text-xs text-muted-foreground">
-              RPC-only writes, append-only movement history{role === "staff" ? " · read-only for staff" : " · products are archived, never deleted"}
+              {products.filter((p) => p.status === "active").length} active{role === "staff" ? " · read-only" : ""}
             </p>
           </div>
         </div>
@@ -272,11 +278,15 @@ export function LiveInventoryPanel() {
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
             <Input
               className="h-8 w-44 pl-8 text-xs"
-              placeholder="Search live catalogue"
+              placeholder="Search products"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              aria-label="Search live products"
+              aria-label="Search products"
             />
+          </div>
+          <div className="flex rounded-lg border p-0.5">
+            <Button variant={view === "grid" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("grid")} aria-label="Grid view"><LayoutGrid className="size-3.5" /></Button>
+            <Button variant={view === "table" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("table")} aria-label="Table view"><List className="size-3.5" /></Button>
           </div>
           {isManager && (
             <Button size="sm" onClick={() => setCreateOpen(true)}>
@@ -286,12 +296,85 @@ export function LiveInventoryPanel() {
         </div>
       </div>
 
+      {categories.length > 1 && (
+        <div className="scroll-region-x border-b px-5 py-2.5 no-scrollbar">
+          <div className="flex w-max gap-2">
+            {categories.map((c) => (
+              <button
+                key={c}
+                onClick={() => setCategory(c)}
+                aria-pressed={category === c}
+                className={`min-h-[30px] whitespace-nowrap rounded-full border px-3 text-[12px] font-medium transition-colors ${
+                  category === c ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                }`}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {results.length === 0 ? (
         <p className="px-5 py-6 text-center text-sm text-muted-foreground">
           {products.length === 0
-            ? "No live products yet — add your first one and it becomes available in the live POS."
+            ? "No products yet — add your first one and it becomes available at the point of sale."
             : "No products match this search."}
         </p>
+      ) : view === "grid" ? (
+        <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
+          {results.map((p) => (
+            <Card key={p.id} className={`overflow-hidden ${p.status === "archived" ? "opacity-60" : ""}`}>
+              <div className="relative aspect-[4/3] w-full">
+                <CatalogueImage image={images.get(p.id) ?? null} name={p.name} artKey="box" className="rounded-none" />
+                {p.status === "archived" && (
+                  <span className="absolute left-1.5 top-1.5 rounded-md bg-background/90 px-1.5 py-0.5 text-[10px] font-medium">Archived</span>
+                )}
+              </div>
+              <div className="p-2.5">
+                {p.category && <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{p.category}</p>}
+                <p className="line-clamp-2 text-[12px] font-medium leading-snug">{p.name}</p>
+                <div className="mt-1.5 flex items-center justify-between">
+                  <span className="text-[13px] font-semibold tabular">{formatINR(p.pricePaise / 100)}</span>
+                  {stores.length > 0 && (
+                    <span className={`text-[11px] tabular ${totalStock(p) <= 0 ? "text-destructive" : "text-muted-foreground"}`}>
+                      {totalStock(p)} in stock
+                    </span>
+                  )}
+                </div>
+                {isManager && (
+                  <div className="mt-2 flex items-center justify-end gap-0.5 border-t pt-1.5">
+                    <Button
+                      variant="ghost" size="icon-sm" className="size-6" title="Receive stock"
+                      disabled={p.status !== "active"}
+                      onClick={() => setStockDialog({ product: p, mode: "receive", storeId: stores[0]?.id ?? "", qty: "", note: "" })}
+                    >
+                      <PackagePlus className="size-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost" size="icon-sm" className="size-6" title="Adjust stock"
+                      disabled={p.status !== "active"}
+                      onClick={() => setStockDialog({ product: p, mode: "adjust", storeId: stores[0]?.id ?? "", qty: "", note: "" })}
+                    >
+                      <Minus className="size-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon-sm" className="size-6" title="Manage photo" onClick={() => setPhotoDialogProduct(p)}>
+                      <ImagePlus className="size-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost" size="icon-sm" className="size-6"
+                      disabled={busyProductId === p.id}
+                      onClick={() => toggleArchive(p)}
+                      title={p.status === "active" ? "Archive" : "Unarchive"}
+                    >
+                      {p.status === "active" ? <Archive className="size-3.5" /> : <ArchiveRestore className="size-3.5" />}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
       ) : (
         <Table>
           <TableHeader>
@@ -310,8 +393,15 @@ export function LiveInventoryPanel() {
             {results.map((p) => (
               <TableRow key={p.id} className={p.status === "archived" ? "opacity-60" : undefined}>
                 <TableCell>
-                  <p className="text-sm font-medium">{p.name}</p>
-                  <p className="font-mono text-[11px] text-muted-foreground">{p.sku} · per {p.unit}</p>
+                  <div className="flex items-center gap-2.5">
+                    <div className="size-9 shrink-0 overflow-hidden rounded-md border bg-muted">
+                      <CatalogueImage image={images.get(p.id) ?? null} name={p.name} artKey="box" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">{p.name}</p>
+                      <p className="font-mono text-[11px] text-muted-foreground">{p.sku} · per {p.unit}</p>
+                    </div>
+                  </div>
                 </TableCell>
                 <TableCell className="hidden text-xs text-muted-foreground sm:table-cell">
                   {p.category ?? "—"}
@@ -361,6 +451,13 @@ export function LiveInventoryPanel() {
                         onClick={() => setStockDialog({ product: p, mode: "adjust", storeId: stores[0]?.id ?? "", qty: "", note: "" })}
                       >
                         <Minus className="mr-1 size-3" /> Adjust
+                      </Button>
+                      <Button
+                        variant="ghost" size="sm" className="h-7 px-2 text-[11px]"
+                        onClick={() => setPhotoDialogProduct(p)}
+                        title="Manage photo"
+                      >
+                        <ImagePlus className="size-3.5" />
                       </Button>
                       <Button
                         variant="ghost" size="sm" className="h-7 px-2 text-[11px]"
@@ -533,6 +630,29 @@ export function LiveInventoryPanel() {
               </strong>{" "}
               × {stockDialog.product.name}
             </p>
+          </div>
+        )}
+      </FormDialog>
+
+      {/* Photo dialog */}
+      <FormDialog
+        open={photoDialogProduct !== null}
+        onOpenChange={(o) => { if (!o) setPhotoDialogProduct(null); }}
+        title={`Product photo — ${photoDialogProduct?.name ?? ""}`}
+        description="Shown in the catalogue and at the POS. Falls back to the standard illustration until a photo is uploaded."
+        footer={<Button variant="outline" onClick={() => setPhotoDialogProduct(null)}>Done</Button>}
+      >
+        {photoDialogProduct && (
+          <div className="py-2">
+            <CatalogueImageUploader
+              owner="product"
+              ownerId={photoDialogProduct.id}
+              name={photoDialogProduct.name}
+              artKey="box"
+              image={images.get(photoDialogProduct.id) ?? null}
+              onChanged={reload}
+              size="h-24 w-24"
+            />
           </div>
         )}
       </FormDialog>

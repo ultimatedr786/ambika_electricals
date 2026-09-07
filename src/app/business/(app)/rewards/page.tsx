@@ -65,117 +65,117 @@ export default function BusinessRewardsPage() {
   );
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Rewards"
-        description="Manage the catalogue your members redeem points against."
-        actions={<Button onClick={() => setCreating(true)}><Plus /> Create Reward</Button>}
-      />
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <PageHeader
+          title="Rewards"
+          description="Manage the catalogue your members redeem points against."
+          actions={!isSupabaseConfigured() ? <Button onClick={() => setCreating(true)}><Plus /> Create Reward</Button> : undefined}
+        />
 
-      {/* Live Supabase rewards & redemptions — renders only when auth is configured */}
+        {!isSupabaseConfigured() && (
+          <>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <StatCard label="Total rewards" value={formatNumber(totals.total)} icon={Gift} />
+              <StatCard label="Active" value={formatNumber(totals.active)} />
+              <StatCard label="Total redemptions" value={formatNumber(totals.redemptions)} icon={TrendingUp} />
+              <StatCard label="Points redeemed" value={formatNumber(totals.points)} />
+            </div>
+
+            <Card className="p-4">
+              <h2 className="text-sm font-semibold">Most redeemed this month</h2>
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                {mostRedeemed.map((r, i) => (
+                  <div key={r.id} className="flex items-center gap-3 rounded-lg border bg-muted/30 p-3">
+                    <span className="text-sm font-semibold tabular text-muted-foreground">{i + 1}</span>
+                    <ProductArt art={r.image} className="size-10 shrink-0" tone="muted" />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{r.name}</p>
+                      <p className="text-xs tabular text-muted-foreground">{r.redemptions} redemptions</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <Tabs value={tab} onValueChange={setTab}>
+                <TabsList>
+                  <TabsTrigger value="all">All</TabsTrigger>
+                  <TabsTrigger value="active">Active</TabsTrigger>
+                  <TabsTrigger value="paused">Paused</TabsTrigger>
+                </TabsList>
+              </Tabs>
+              <SearchInput value={query} onChange={setQuery} placeholder="Search rewards" className="min-w-[200px] flex-1" />
+              <Select value={type} onValueChange={setType}>
+                <SelectTrigger className="w-[190px]" aria-label="Reward type"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All types</SelectItem>
+                  {rewardTypes.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-region space-y-4 p-1">
       <LiveRewardsPanel />
 
-      {isSupabaseConfigured() && (
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-muted-foreground">Prototype rewards</h2>
-          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Demo data — migrates in a later slice
-          </span>
-        </div>
-      )}
-
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Total rewards" value={formatNumber(totals.total)} icon={Gift} />
-        <StatCard label="Active" value={formatNumber(totals.active)} />
-        <StatCard label="Total redemptions" value={formatNumber(totals.redemptions)} icon={TrendingUp} />
-        <StatCard label="Points redeemed" value={formatNumber(totals.points)} />
-      </div>
-
-      <Card className="p-4">
-        <h2 className="text-sm font-semibold">Most redeemed this month</h2>
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
-          {mostRedeemed.map((r, i) => (
-            <div key={r.id} className="flex items-center gap-3 rounded-lg border bg-muted/30 p-3">
-              <span className="text-sm font-semibold tabular text-muted-foreground">{i + 1}</span>
-              <ProductArt art={r.image} className="size-10 shrink-0" tone="muted" />
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{r.name}</p>
-                <p className="text-xs tabular text-muted-foreground">{r.redemptions} redemptions</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      <div className="flex flex-wrap items-center gap-2.5">
-        <Tabs value={tab} onValueChange={setTab}>
-          <TabsList>
-            <TabsTrigger value="all">All</TabsTrigger>
-            <TabsTrigger value="active">Active</TabsTrigger>
-            <TabsTrigger value="paused">Paused</TabsTrigger>
-          </TabsList>
-        </Tabs>
-        <SearchInput value={query} onChange={setQuery} placeholder="Search rewards" className="min-w-[200px] flex-1" />
-        <Select value={type} onValueChange={setType}>
-          <SelectTrigger className="w-[190px]" aria-label="Reward type"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All types</SelectItem>
-            {rewardTypes.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-          </SelectContent>
-        </Select>
-      </div>
-
-      {results.length === 0 ? (
-        <EmptyState
-          icon={Search}
-          title="No rewards match."
-          description="Adjust your filters or create a new reward for your members."
-          action={<Button onClick={() => setCreating(true)}><Plus /> Create reward</Button>}
-        />
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {results.map((r, i) => (
-            <motion.div key={r.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i, 9) * 0.03 }}>
-              <Card className="flex h-full flex-col p-4">
-                <div className="flex items-start gap-3">
-                  <ProductArt art={r.image} className="size-14 shrink-0" tone="muted" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-sm font-medium leading-snug">{r.name}</p>
-                      <StatusBadge status={r.status} />
+      {!isSupabaseConfigured() && (
+        results.length === 0 ? (
+          <EmptyState
+            icon={Search}
+            title="No rewards match."
+            description="Adjust your filters or create a new reward for your members."
+            action={<Button onClick={() => setCreating(true)}><Plus /> Create reward</Button>}
+          />
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {results.map((r, i) => (
+              <motion.div key={r.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i, 9) * 0.03 }}>
+                <Card className="flex h-full flex-col p-4">
+                  <div className="flex items-start gap-3">
+                    <ProductArt art={r.image} className="size-14 shrink-0" tone="muted" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm font-medium leading-snug">{r.name}</p>
+                        <StatusBadge status={r.status} />
+                      </div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">{r.type}{r.brand ? ` · ${r.brand}` : ""}</p>
                     </div>
-                    <p className="mt-0.5 text-xs text-muted-foreground">{r.type}{r.brand ? ` · ${r.brand}` : ""}</p>
                   </div>
-                </div>
-                <p className="mt-2.5 line-clamp-2 text-xs text-muted-foreground">{r.description}</p>
-                <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                  <Badge variant="secondary" className="tabular">{formatNumber(r.points)} pts</Badge>
-                  {r.regularPrice ? <Badge variant="outline" className="tabular">Worth {formatINR(r.regularPrice)}</Badge> : null}
-                  <TierBadge tier={r.minTier} />
-                  <Badge variant="outline" className={cn(r.stockStatus === "Out of Stock" && "text-destructive")}>{r.stockStatus}</Badge>
-                </div>
-                <Separator className="my-3" />
-                <div className="mt-auto flex items-center justify-between">
-                  <div className="text-xs tabular text-muted-foreground">
-                    {r.redemptions} redeemed · {formatNumber(r.inventory)} left
+                  <p className="mt-2.5 line-clamp-2 text-xs text-muted-foreground">{r.description}</p>
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    <Badge variant="secondary" className="tabular">{formatNumber(r.points)} pts</Badge>
+                    {r.regularPrice ? <Badge variant="outline" className="tabular">Worth {formatINR(r.regularPrice)}</Badge> : null}
+                    <TierBadge tier={r.minTier} />
+                    <Badge variant="outline" className={cn(r.stockStatus === "Out of Stock" && "text-destructive")}>{r.stockStatus}</Badge>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Switch
-                      checked={r.status === "Active"}
-                      aria-label={`${r.status === "Active" ? "Pause" : "Activate"} ${r.name}`}
-                      onCheckedChange={async (v) => {
-                        await rewardService.updateReward(r.id, { status: v ? "Active" : "Paused" });
-                        toast.success(v ? `${r.name} is now live.` : `${r.name} paused.`);
-                      }}
-                    />
-                    <Button variant="ghost" size="icon-sm" onClick={() => setEditing(r)} aria-label={`Edit ${r.name}`}><Pencil /></Button>
+                  <Separator className="my-3" />
+                  <div className="mt-auto flex items-center justify-between">
+                    <div className="text-xs tabular text-muted-foreground">
+                      {r.redemptions} redeemed · {formatNumber(r.inventory)} left
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={r.status === "Active"}
+                        aria-label={`${r.status === "Active" ? "Pause" : "Activate"} ${r.name}`}
+                        onCheckedChange={async (v) => {
+                          await rewardService.updateReward(r.id, { status: v ? "Active" : "Paused" });
+                          toast.success(v ? `${r.name} is now live.` : `${r.name} paused.`);
+                        }}
+                      />
+                      <Button variant="ghost" size="icon-sm" onClick={() => setEditing(r)} aria-label={`Edit ${r.name}`}><Pencil /></Button>
+                    </div>
                   </div>
-                </div>
-              </Card>
-            </motion.div>
-          ))}
-        </div>
+                </Card>
+              </motion.div>
+            ))}
+          </div>
+        )
       )}
+      </div>
 
       <RewardDialog
         reward={editing}

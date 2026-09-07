@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import dynamic from "next/dynamic";
 import {
-  CreditCard, Gift, Heart, Home, LogOut, PanelLeftClose, PanelLeftOpen, Receipt,
+  ChevronLeft, ChevronRight, CreditCard, Gift, Heart, Home, Info, LogOut, Receipt,
   Search, Settings, ShoppingBag, Sparkles, Trophy, UserRound, Users, Wallet,
 } from "lucide-react";
 import { Logo, LogoMark } from "@/components/shared/logo";
@@ -19,6 +19,7 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { AboutDialog } from "@/components/shared/about-dialog";
 /** Hard-gated internal dev tool — renders null in every normal build. */
 import { DemoSwitcher } from "@/components/shared/demo-switcher";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -61,6 +62,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
   const customer = useCurrentCustomer();
   const { authService, cartService } = useServices();
   const prefetch = usePrefetchOnIntent();
+  const [aboutOpen, setAboutOpen] = React.useState(false);
   const [signOutOpen, setSignOutOpen] = React.useState(false);
   const supabase = React.useMemo(() => createBrowserSupabaseClient(), []);
   const { collapsed, ready: sidebarReady, toggle: toggleSidebar } = useSidebarCollapsed();
@@ -75,7 +77,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
     pathname === href || (href !== "/customer/dashboard" && pathname.startsWith(href));
 
   return (
-    <div className="min-h-[100dvh] bg-background">
+    <div className="min-h-[100dvh] lg:h-screen lg:max-h-screen lg:overflow-hidden bg-background flex flex-col">
       {/* Desktop sidebar */}
       <aside
         className={cn(
@@ -84,10 +86,30 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
         )}
         data-collapsed={collapsed ? "true" : "false"}
       >
-        <div className={cn("flex h-16 items-center", collapsed ? "justify-center px-2" : "px-5")}>
+        <div className={cn("relative flex h-16 items-center", collapsed ? "justify-center px-2" : "px-5")}>
           <Link href="/customer/dashboard" className="rounded-lg" aria-label="Ambika Electricals Rewards — home">
             {collapsed ? <LogoMark size={30} /> : <Logo />}
           </Link>
+
+          {/* Floating rail toggle — straddles the sidebar's border so it reads
+              as part of the frame rather than another row in the nav list. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <motion.button
+                type="button"
+                onClick={toggleSidebar}
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.94 }}
+                aria-expanded={!collapsed}
+                aria-controls="customer-sidebar-nav"
+                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                className="absolute -right-3.5 top-1/2 z-10 flex size-7 -translate-y-1/2 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition-colors hover:border-primary/40 hover:text-primary"
+              >
+                {collapsed ? <ChevronRight className="size-3.5" /> : <ChevronLeft className="size-3.5" />}
+              </motion.button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{collapsed ? "Expand sidebar" : "Collapse sidebar"}</TooltipContent>
+          </Tooltip>
         </div>
         <nav
           id="customer-sidebar-nav"
@@ -108,18 +130,18 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
                 className={cn(
                   "relative flex items-center rounded-lg py-2.5 text-sm font-medium transition-colors",
                   collapsed ? "justify-center px-0" : "gap-3 px-3",
-                  active ? "text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  active ? "text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
                 )}
               >
                 {active && (
                   <motion.span
                     layoutId="customer-nav-active"
-                    className="absolute inset-0 rounded-lg bg-primary/8"
+                    className="absolute inset-0 rounded-lg bg-gradient-to-br from-primary to-primary/80 shadow-sm shadow-primary/25"
                     transition={{ type: "spring", stiffness: 420, damping: 34 }}
                   />
                 )}
                 {active && collapsed && (
-                  <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary" aria-hidden />
+                  <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary-foreground/80" aria-hidden />
                 )}
                 <item.icon className="relative size-[18px]" aria-hidden />
                 {!collapsed && <span className="relative">{item.label}</span>}
@@ -168,44 +190,56 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
               <p className="text-[13px] text-white/70">{customer.tier} member</p>
             </Link>
           )}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                aria-expanded={!collapsed}
-                aria-controls="customer-sidebar-nav"
-                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-                className={cn(
-                  "flex w-full items-center rounded-lg p-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-                  collapsed ? "justify-center" : "gap-2.5"
-                )}
-              >
-                {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
-                {!collapsed && <span>Collapse sidebar</span>}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">{collapsed ? "Expand sidebar" : "Collapse sidebar"}</TooltipContent>
-          </Tooltip>
+
+          {/* About / NisuNex Attribution */}
+          {collapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => setAboutOpen(true)}
+                  aria-label="About Rewardly (v1.0.0)"
+                  className="flex w-full items-center justify-center rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <Info className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                <p className="font-medium">Rewardly v1.0.0</p>
+                <p className="text-[11px] text-muted-foreground">Developed by NisuNex</p>
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAboutOpen(true)}
+              className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              aria-label="About Rewardly and NisuNex"
+            >
+              <span className="font-mono text-[11px] font-medium tracking-tight">v1.0.0</span>
+              <span className="text-[10px] tracking-wide text-muted-foreground">by NisuNex</span>
+            </button>
+          )}
         </div>
       </aside>
 
       {/* Topbar */}
       <header
         className={cn(
-          "sticky top-0 z-20 border-b bg-background/85 backdrop-blur-md lg:pl-[var(--sidebar-w)]",
+          "sticky top-0 z-20 shrink-0 border-b bg-background/85 backdrop-blur-md lg:pl-[var(--sidebar-w)]",
           sidebarReady && "motion-safe:transition-[padding] motion-safe:duration-200 motion-safe:ease-out"
         )}
       >
         <div className="safe-top flex h-14 items-center gap-2 px-4 sm:h-16 sm:px-6">
           <Link href="/customer/dashboard" className="lg:hidden"><Logo size={28} showTagline={false} /></Link>
           <button
+            type="button"
             onClick={() => setPaletteOpen(true)}
-            className="ml-auto hidden h-9 w-72 items-center gap-2 rounded-lg border bg-muted/50 px-3 text-sm text-muted-foreground transition-colors hover:bg-muted lg:flex"
+            className="ml-auto hidden h-10 w-[450px] max-w-[480px] shrink-0 items-center gap-2.5 rounded-lg border bg-muted/50 px-3.5 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:flex"
           >
-            <Search className="size-4" />
-            Search rewards, redemptions, pages…
-            <kbd className="ml-auto rounded border bg-background px-1.5 py-0.5 text-[10px] font-medium">
+            <Search className="size-4 shrink-0" />
+            <span className="truncate whitespace-nowrap text-left flex-1">Search rewards, redemptions, pages…</span>
+            <kbd className="ml-auto shrink-0 rounded border bg-background px-1.5 py-0.5 text-[10px] font-medium">
               <span className="sr-only">Keyboard shortcut: </span>
               <span aria-hidden>⌘K</span>
             </kbd>
@@ -269,11 +303,11 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
 
       <main
         className={cn(
-          "lg:pl-[var(--sidebar-w)]",
+          "flex-1 min-h-0 min-w-0 flex flex-col lg:pl-[var(--sidebar-w)] lg:overflow-hidden",
           sidebarReady && "motion-safe:transition-[padding] motion-safe:duration-200 motion-safe:ease-out"
         )}
       >
-        <div className="mx-auto w-full max-w-6xl px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:pb-12">{children}</div>
+        <div className="mx-auto w-full max-w-6xl px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:pb-6 flex-1 min-h-0 flex flex-col">{children}</div>
       </main>
 
       {/* Mobile bottom nav */}
@@ -338,6 +372,7 @@ export function CustomerShell({ children }: { children: React.ReactNode }) {
           })();
         }}
       />
+      <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
     </div>
   );
 }

@@ -4,11 +4,12 @@ import * as React from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { usePathname, useRouter } from "next/navigation";
+import * as AccordionPrimitive from "@radix-ui/react-accordion";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 import {
-  BadgePercent, BarChart3, Building2, CreditCard, Gift, HelpCircle, LayoutGrid,
-  LogOut, Megaphone, MoreHorizontal, Package, PanelLeftClose, PanelLeftOpen, Plus,
+  BadgePercent, BarChart3, Building2, ChevronDown, ChevronLeft, ChevronRight, CreditCard,
+  Gift, HelpCircle, Info, LayoutGrid, LogOut, Megaphone, MoreHorizontal, Package, Plus,
   Search, Settings, ShoppingCart, Store, Trophy, UserRound, Users, Zap,
 } from "lucide-react";
 import { Logo, LogoMark } from "@/components/shared/logo";
@@ -23,6 +24,7 @@ import {
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { AboutDialog } from "@/components/shared/about-dialog";
 /**
  * Internal developer persona switcher. The component hard-gates itself
  * (`isDemoDevToolsEnabled()`), so in every normal build — demo or production —
@@ -49,7 +51,6 @@ import { cn } from "@/lib/utils";
 const nav = [
   { group: "Overview", items: [
     { href: "/business/dashboard", label: "Dashboard", icon: LayoutGrid },
-    { href: "/business/analytics", label: "Analytics", icon: BarChart3 },
   ]},
   { group: "Operations", items: [
     { href: "/business/sales", label: "Sales", icon: ShoppingCart },
@@ -63,6 +64,7 @@ const nav = [
     { href: "/business/challenges", label: "Challenges", icon: Trophy },
   ]},
   { group: "Business", items: [
+    { href: "/business/analytics", label: "Analytics", icon: BarChart3 },
     { href: "/business/stores", label: "Stores", icon: Store },
     { href: "/business/staff", label: "Staff", icon: UserRound },
     { href: "/business/settings", label: "Settings", icon: Settings },
@@ -96,6 +98,7 @@ export function BusinessShell({
   // Keep the palette mounted after its first open so re-opening is instant.
   const paletteMounted = React.useRef(false);
   if (paletteOpen) paletteMounted.current = true;
+  const [aboutOpen, setAboutOpen] = React.useState(false);
   const [signOutOpen, setSignOutOpen] = React.useState(false);
   const supabase = React.useMemo(() => createBrowserSupabaseClient(), []);
   const { collapsed, ready: sidebarReady, toggle: toggleSidebar } = useSidebarCollapsed();
@@ -107,13 +110,16 @@ export function BusinessShell({
       .filter((g) => g.items.length > 0);
   }, [ownerRestricted]);
   const [moreOpen, setMoreOpen] = React.useState(false);
+  // Every group starts expanded — the accordion lets a user tuck away
+  // sections they don't use, it never hides anything by default.
+  const [openGroups, setOpenGroups] = React.useState<string[]>(() => nav.map((g) => g.group));
 
   useGlobalSearchHotkey(setPaletteOpen);
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
 
   return (
-    <div className="min-h-[100dvh] bg-muted/30">
+    <div className="min-h-[100dvh] lg:h-screen lg:max-h-screen lg:overflow-hidden bg-muted/30 flex flex-col">
       {/* Sidebar — width is driven by the --sidebar-w CSS variable so the
           persisted collapse preference applies on the first paint. */}
       <aside
@@ -123,10 +129,30 @@ export function BusinessShell({
         )}
         data-collapsed={collapsed ? "true" : "false"}
       >
-        <div className={cn("flex h-16 items-center", collapsed ? "justify-center px-2" : "px-5")}>
+        <div className={cn("relative flex h-16 items-center", collapsed ? "justify-center px-2" : "px-5")}>
           <Link href="/business/dashboard" className="rounded-lg" aria-label="Ambika Electricals Rewards — dashboard">
             {collapsed ? <LogoMark size={30} /> : <Logo />}
           </Link>
+
+          {/* Floating rail toggle — straddles the sidebar's border so it reads
+              as part of the frame rather than another row in the nav list. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <motion.button
+                type="button"
+                onClick={toggleSidebar}
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.94 }}
+                aria-expanded={!collapsed}
+                aria-controls="business-sidebar-nav"
+                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                className="absolute -right-3.5 top-1/2 z-10 flex size-7 -translate-y-1/2 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition-colors hover:border-primary/40 hover:text-primary"
+              >
+                {collapsed ? <ChevronRight className="size-3.5" /> : <ChevronLeft className="size-3.5" />}
+              </motion.button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{collapsed ? "Expand sidebar" : "Collapse sidebar"}</TooltipContent>
+          </Tooltip>
         </div>
         <div className={cn("pb-2", collapsed ? "px-2" : "px-3")}>
           {collapsed ? (
@@ -143,106 +169,132 @@ export function BusinessShell({
           )}
         </div>
         <nav className={cn("scroll-region flex-1 py-2", collapsed ? "px-2" : "px-3")} aria-label="Business navigation" id="business-sidebar-nav">
-          {visibleNav.map((group) => (
-            <div key={group.group} className="mb-3">
-              {collapsed ? (
+          {collapsed ? (
+            visibleNav.map((group) => (
+              <div key={group.group} className="mb-3">
                 <div className="mx-2 mb-1.5 h-px bg-border" role="presentation" />
-              ) : (
-                <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {group.group}
-                </p>
-              )}
-              <div className="space-y-0.5">
-                {group.items.map((item) => {
-                  const active = isActive(item.href);
-                  const link = (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      onMouseEnter={() => prefetch(item.href)}
-                      onFocus={() => prefetch(item.href)}
-                      onTouchStart={() => prefetch(item.href)}
-                      aria-current={active ? "page" : undefined}
-                      aria-label={collapsed ? item.label : undefined}
-                      className={cn(
-                        "relative flex items-center rounded-lg py-2 text-sm font-medium transition-colors",
-                        collapsed ? "justify-center px-0" : "gap-3 px-3",
-                        active ? "text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                      )}
-                    >
-                      {active && (
-                        <motion.span
-                          layoutId="biz-nav-active"
-                          className="absolute inset-0 rounded-lg bg-primary/8"
-                          transition={{ type: "spring", stiffness: 420, damping: 34 }}
-                        />
-                      )}
-                      {/* Collapsed rail keeps an unmistakable active-route marker. */}
-                      {active && collapsed && (
-                        <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary" aria-hidden />
-                      )}
-                      <item.icon className="relative size-[18px]" aria-hidden />
-                      {!collapsed && <span className="relative">{item.label}</span>}
-                    </Link>
-                  );
-                  return collapsed ? (
-                    <Tooltip key={item.href}>
-                      <TooltipTrigger asChild>{link}</TooltipTrigger>
-                      <TooltipContent side="right">{item.label}</TooltipContent>
-                    </Tooltip>
-                  ) : (
-                    link
-                  );
-                })}
+                <div className="space-y-0.5">
+                  {group.items.map((item) => {
+                    const active = isActive(item.href);
+                    return (
+                      <Tooltip key={item.href}>
+                        <TooltipTrigger asChild>
+                          <Link
+                            href={item.href}
+                            onMouseEnter={() => prefetch(item.href)}
+                            onFocus={() => prefetch(item.href)}
+                            onTouchStart={() => prefetch(item.href)}
+                            aria-current={active ? "page" : undefined}
+                            aria-label={item.label}
+                            className={cn(
+                              "relative flex items-center justify-center rounded-lg px-0 py-2 text-sm font-medium transition-colors",
+                              active ? "text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                            )}
+                          >
+                            {active && (
+                              <motion.span
+                                layoutId="biz-nav-active"
+                                className="absolute inset-0 rounded-lg bg-gradient-to-br from-primary to-primary/80 shadow-sm shadow-primary/25"
+                                transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                              />
+                            )}
+                            {/* Collapsed rail keeps an unmistakable active-route marker. */}
+                            {active && (
+                              <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary-foreground/80" aria-hidden />
+                            )}
+                            <item.icon className="relative size-[18px]" aria-hidden />
+                          </Link>
+                        </TooltipTrigger>
+                        <TooltipContent side="right">{item.label}</TooltipContent>
+                      </Tooltip>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          ))}
+            ))
+          ) : (
+            <AccordionPrimitive.Root type="multiple" value={openGroups} onValueChange={setOpenGroups} className="space-y-1">
+              {visibleNav.map((group) => (
+                <AccordionPrimitive.Item key={group.group} value={group.group}>
+                  <AccordionPrimitive.Header>
+                    <AccordionPrimitive.Trigger className="group flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground">
+                      {group.group}
+                      <ChevronDown className="size-3.5 text-muted-foreground/50 transition-transform duration-200 group-data-[state=open]:rotate-180" aria-hidden />
+                    </AccordionPrimitive.Trigger>
+                  </AccordionPrimitive.Header>
+                  <AccordionPrimitive.Content className="overflow-hidden data-[state=closed]:animate-accordion-up data-[state=open]:animate-accordion-down">
+                    <div className="space-y-0.5 pb-2 pt-0.5">
+                      {group.items.map((item) => {
+                        const active = isActive(item.href);
+                        return (
+                          <Link
+                            key={item.href}
+                            href={item.href}
+                            onMouseEnter={() => prefetch(item.href)}
+                            onFocus={() => prefetch(item.href)}
+                            onTouchStart={() => prefetch(item.href)}
+                            aria-current={active ? "page" : undefined}
+                            className={cn(
+                              "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                              active ? "text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                            )}
+                          >
+                            {active && (
+                              <motion.span
+                                layoutId="biz-nav-active"
+                                className="absolute inset-0 rounded-lg bg-gradient-to-br from-primary to-primary/80 shadow-sm shadow-primary/25"
+                                transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                              />
+                            )}
+                            <item.icon className="relative size-[18px]" aria-hidden />
+                            <span className="relative">{item.label}</span>
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  </AccordionPrimitive.Content>
+                </AccordionPrimitive.Item>
+              ))}
+            </AccordionPrimitive.Root>
+          )}
         </nav>
         <div className={cn("space-y-1 border-t", collapsed ? "p-2" : "p-3")}>
+          {/* About / NisuNex Attribution */}
           {collapsed ? (
             <Tooltip>
               <TooltipTrigger asChild>
-                <Link
-                  href="/customer/dashboard"
-                  aria-label="View customer app"
-                  className="flex items-center justify-center rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                <button
+                  type="button"
+                  onClick={() => setAboutOpen(true)}
+                  aria-label="About Rewardly (v1.0.0)"
+                  className="flex w-full items-center justify-center rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 >
-                  <Zap className="size-4" />
-                </Link>
+                  <Info className="size-4" />
+                </button>
               </TooltipTrigger>
-              <TooltipContent side="right">View customer app</TooltipContent>
+              <TooltipContent side="right">
+                <p className="font-medium">Rewardly v1.0.0</p>
+                <p className="text-[11px] text-muted-foreground">Developed by NisuNex</p>
+              </TooltipContent>
             </Tooltip>
           ) : (
-            <Link href="/customer/dashboard" className="flex items-center gap-2.5 rounded-lg p-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-              <Zap className="size-4" /> View customer app
-            </Link>
+            <button
+              type="button"
+              onClick={() => setAboutOpen(true)}
+              className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              aria-label="About Rewardly and NisuNex"
+            >
+              <span className="font-mono text-[11px] font-medium tracking-tight">v1.0.0</span>
+              <span className="text-[10px] tracking-wide text-muted-foreground">by NisuNex</span>
+            </button>
           )}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                aria-expanded={!collapsed}
-                aria-controls="business-sidebar-nav"
-                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-                className={cn(
-                  "flex w-full items-center rounded-lg p-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-                  collapsed ? "justify-center" : "gap-2.5"
-                )}
-              >
-                {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
-                {!collapsed && <span>Collapse sidebar</span>}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">{collapsed ? "Expand sidebar" : "Collapse sidebar"}</TooltipContent>
-          </Tooltip>
         </div>
       </aside>
 
       {/* Topbar */}
       <header
         className={cn(
-          "sticky top-0 z-20 border-b bg-background/85 backdrop-blur-md lg:pl-[var(--sidebar-w)]",
+          "sticky top-0 z-20 shrink-0 border-b bg-background/85 backdrop-blur-md lg:pl-[var(--sidebar-w)]",
           sidebarReady && "motion-safe:transition-[padding] motion-safe:duration-200 motion-safe:ease-out"
         )}
       >
@@ -250,12 +302,13 @@ export function BusinessShell({
           <Link href="/business/dashboard" className="lg:hidden"><Logo size={28} showTagline={false} /></Link>
 
           <button
+            type="button"
             onClick={() => setPaletteOpen(true)}
-            className="ml-auto hidden h-9 w-72 items-center gap-2 rounded-lg border bg-muted/50 px-3 text-sm text-muted-foreground transition-colors hover:bg-muted lg:flex"
+            className="ml-auto hidden h-10 w-[450px] max-w-[480px] shrink-0 items-center gap-2.5 rounded-lg border bg-muted/50 px-3.5 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:flex"
           >
-            <Search className="size-4" />
-            Search customers, products, sales…
-            <kbd className="ml-auto rounded border bg-background px-1.5 py-0.5 text-[10px] font-medium">
+            <Search className="size-4 shrink-0" />
+            <span className="truncate whitespace-nowrap text-left flex-1">Search customers, products, sales…</span>
+            <kbd className="ml-auto shrink-0 rounded border bg-background px-1.5 py-0.5 text-[10px] font-medium">
               <span className="sr-only">Keyboard shortcut: </span>
               <span aria-hidden>⌘K</span>
             </kbd>
@@ -303,11 +356,11 @@ export function BusinessShell({
 
       <main
         className={cn(
-          "lg:pl-[var(--sidebar-w)]",
+          "flex-1 min-h-0 min-w-0 flex flex-col lg:pl-[var(--sidebar-w)] lg:overflow-hidden",
           sidebarReady && "motion-safe:transition-[padding] motion-safe:duration-200 motion-safe:ease-out"
         )}
       >
-        <div className="mx-auto w-full max-w-[1400px] px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:pb-10">{children}</div>
+        <div className="mx-auto w-full max-w-[1400px] px-4 pb-28 pt-4 sm:px-6 sm:pt-6 lg:pb-6 flex-1 min-h-0 flex flex-col">{children}</div>
       </main>
 
       {/* Mobile bottom nav */}
@@ -418,6 +471,7 @@ export function BusinessShell({
           })();
         }}
       />
+      <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
     </div>
   );
 }

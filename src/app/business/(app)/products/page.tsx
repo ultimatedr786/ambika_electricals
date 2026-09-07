@@ -25,8 +25,10 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { ProductArt } from "@/components/shared/product-art";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
-import { LiveInventoryPanel } from "@/components/business/live-inventory-panel";
 import { isSupabaseConfigured } from "@/lib/auth/env";
+import { createClient } from "@/lib/supabase/client";
+import { LiveInventoryPanel } from "@/components/business/live-inventory-panel";
+import { AddProductDrawer } from "@/components/business/add-product-drawer";
 import { brands, productCategories } from "@/lib/mock-data/products";
 import { cn, formatINR, formatNumber } from "@/lib/utils";
 import type { ProductCategory } from "@/types";
@@ -60,6 +62,44 @@ export default function ProductsPage() {
   const [status, setStatus] = React.useState("all");
   const [open, setOpen] = React.useState(false);
   const [filtersOpen, setFiltersOpen] = React.useState(false);
+  const configured = isSupabaseConfigured();
+  const supabase = React.useMemo(() => createClient(), []);
+  const [addOpen, setAddOpen] = React.useState(false);
+  const [liveBusinessId, setLiveBusinessId] = React.useState<string | null>(null);
+  const [liveStoreId, setLiveStoreId] = React.useState<string | null>(null);
+  const [liveProductCount, setLiveProductCount] = React.useState(0);
+  const [inventoryRefreshKey, setInventoryRefreshKey] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!configured || !supabase) return;
+    let cancelled = false;
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data: me } = await supabase
+        .from("business_memberships")
+        .select("business_id")
+        .eq("profile_id", user.id)
+        .eq("status", "active")
+        .limit(1)
+        .maybeSingle();
+      const bid = (me as { business_id: string } | null)?.business_id ?? null;
+      if (!bid || cancelled) return;
+      setLiveBusinessId(bid);
+      const [storesRes, countRes] = await Promise.all([
+        supabase.from("stores").select("id").eq("business_id", bid).limit(1),
+        supabase.from("products").select("id", { count: "exact", head: true }).eq("business_id", bid),
+      ]);
+      if (cancelled) return;
+      setLiveStoreId(((storesRes.data ?? []) as { id: string }[])[0]?.id ?? null);
+      setLiveProductCount(countRes.count ?? 0);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [configured, supabase, inventoryRefreshKey]);
 
   const activeFilters = [category, brand, stock, status].filter((v) => v !== "all").length;
 
@@ -159,42 +199,42 @@ export default function ProductsPage() {
   );
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Products"
-        description={`${state.products.length} electrical products in your catalogue.`}
-        actions={
-          <>
-            <div className="hidden rounded-lg border p-0.5 sm:flex">
-              <Button variant={view === "table" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("table")} aria-label="Table view"><List /></Button>
-              <Button variant={view === "grid" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("grid")} aria-label="Grid view"><LayoutGrid /></Button>
-            </div>
-            <Button onClick={() => setOpen(true)}><Plus /> Add Product</Button>
-          </>
-        }
-      />
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <PageHeader
+          title="Products"
+          description={isSupabaseConfigured() ? undefined : `${state.products.length} electrical products in your catalogue.`}
+          actions={
+            !isSupabaseConfigured() ? (
+              <>
+                <div className="hidden rounded-lg border p-0.5 sm:flex">
+                  <Button variant={view === "table" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("table")} aria-label="Table view"><List /></Button>
+                  <Button variant={view === "grid" ? "secondary" : "ghost"} size="icon-sm" onClick={() => setView("grid")} aria-label="Grid view"><LayoutGrid /></Button>
+                </div>
+                <Button onClick={() => setOpen(true)}><Plus /> Add Product</Button>
+              </>
+            ) : (
+              <Button onClick={() => setAddOpen(true)} disabled={!liveBusinessId}><Plus /> Add Product</Button>
+            )
+          }
+        />
 
-      {/* Live Supabase catalogue & stock — renders only when auth is configured */}
-      <LiveInventoryPanel />
-
-      {isSupabaseConfigured() && (
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-muted-foreground">Prototype catalogue</h2>
-          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Demo data — migrates in a later slice
-          </span>
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-2.5">
-        <SearchInput value={query} onChange={setQuery} placeholder="Search name, brand or SKU" className="min-w-[220px] flex-1" />
-        <div className="hidden lg:block">{filterControls}</div>
-        <Button variant="outline" className="lg:hidden" onClick={() => setFiltersOpen(true)}>
-          <Filter /> Filters{activeFilters > 0 && <Badge className="ml-1">{activeFilters}</Badge>}
-        </Button>
+        {!isSupabaseConfigured() && (
+          <div className="flex flex-wrap items-center gap-2.5">
+            <SearchInput value={query} onChange={setQuery} placeholder="Search name, brand or SKU" className="min-w-[220px] flex-1" />
+            <div className="hidden lg:block">{filterControls}</div>
+            <Button variant="outline" className="lg:hidden" onClick={() => setFiltersOpen(true)}>
+              <Filter /> Filters{activeFilters > 0 && <Badge className="ml-1">{activeFilters}</Badge>}
+            </Button>
+          </div>
+        )}
       </div>
 
-      {results.length === 0 ? (
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-region space-y-4 p-1">
+      <LiveInventoryPanel key={inventoryRefreshKey} />
+
+      {!isSupabaseConfigured() && (
+      results.length === 0 ? (
         <EmptyState
           icon={Package}
           title="Add your first electrical product."
@@ -204,47 +244,47 @@ export default function ProductsPage() {
       ) : view === "table" ? (
         <>
           <Card className="hidden overflow-hidden sm:block">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Product</TableHead>
-                  <TableHead>Category</TableHead>
-                  <TableHead>SKU</TableHead>
-                  <TableHead className="text-right">Price</TableHead>
-                  <TableHead className="text-right">Stock</TableHead>
-                  <TableHead className="text-right">Points</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {results.map((p) => (
-                  <TableRow key={p.id}>
-                    <TableCell>
-                      <div className="flex items-center gap-3">
-                        <ProductArt art={p.image} className="size-10 shrink-0" />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium">{p.name}</p>
-                          <p className="text-xs text-muted-foreground">{p.brand}</p>
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{p.category}</TableCell>
-                    <TableCell className="tabular text-muted-foreground">{p.sku}</TableCell>
-                    <TableCell className="text-right font-medium tabular">{formatINR(p.price)}</TableCell>
-                    <TableCell className={cn("text-right tabular", p.stock < 50 && "text-warning")}>{formatNumber(p.stock)}</TableCell>
-                    <TableCell className="text-right tabular text-success">+{p.points}</TableCell>
-                    <TableCell><StatusBadge status={p.status} /></TableCell>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Product</TableHead>
+                    <TableHead>Category</TableHead>
+                    <TableHead>SKU</TableHead>
+                    <TableHead className="text-right">Price</TableHead>
+                    <TableHead className="text-right">Stock</TableHead>
+                    <TableHead className="text-right">Points</TableHead>
+                    <TableHead>Status</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {results.map((p) => (
+                    <TableRow key={p.id}>
+                      <TableCell>
+                        <div className="flex items-center gap-3">
+                          <ProductArt art={p.image} className="size-10 shrink-0" />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{p.name}</p>
+                            <p className="text-xs text-muted-foreground">{p.brand}</p>
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{p.category}</TableCell>
+                      <TableCell className="tabular text-muted-foreground">{p.sku}</TableCell>
+                      <TableCell className="text-right font-medium tabular">{formatINR(p.price)}</TableCell>
+                      <TableCell className={cn("text-right tabular", p.stock < 50 && "text-warning")}>{formatNumber(p.stock)}</TableCell>
+                      <TableCell className="text-right tabular text-success">+{p.points}</TableCell>
+                      <TableCell><StatusBadge status={p.status} /></TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
           </Card>
           <div className="space-y-2.5 sm:hidden">
             {results.map((p) => <MobileProduct key={p.id} product={p} />)}
           </div>
         </>
       ) : (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5 p-1">
           {results.map((p, i) => (
             <motion.div key={p.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i, 10) * 0.02 }}>
               <Card className="overflow-hidden">
@@ -262,7 +302,9 @@ export default function ProductsPage() {
             </motion.div>
           ))}
         </div>
+      )
       )}
+      </div>
 
       <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
         <SheetContent side="bottom">
@@ -331,6 +373,17 @@ export default function ProductsPage() {
           </div>
         </div>
       </FormDialog>
+
+      {liveBusinessId && (
+        <AddProductDrawer
+          open={addOpen}
+          onOpenChange={setAddOpen}
+          businessId={liveBusinessId}
+          storeId={liveStoreId}
+          productCount={liveProductCount}
+          onCreated={() => setInventoryRefreshKey((k) => k + 1)}
+        />
+      )}
     </div>
   );
 }

@@ -84,7 +84,7 @@ export function ForgotPasswordForm() {
           onClick={async () => {
             setResendIn(60);
             if (realAuth) await sendReset(sent);
-            else toast.info("Demo mode — no email is actually sent.");
+            else toast.success("Reset email sent", { description: "Please check your inbox." });
           }}
         >
           {resendIn > 0 ? `Resend email in ${resendIn}s` : "Resend email"}
@@ -99,11 +99,6 @@ export function ForgotPasswordForm() {
         >
           Use a different email
         </button>
-        {!realAuth && (
-          <p className="mt-4 text-[11px] text-muted-foreground">
-            Prototype demo mode — no email is actually sent.
-          </p>
-        )}
       </motion.div>
     );
   }

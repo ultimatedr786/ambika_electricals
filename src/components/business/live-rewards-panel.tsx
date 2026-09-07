@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Archive, ArchiveRestore, BadgeCheck, Gift, PackageCheck, Search, TicketCheck, XCircle } from "lucide-react";
+import { Archive, ArchiveRestore, BadgeCheck, Gift, ImagePlus, PackageCheck, Search, TicketCheck, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +17,8 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { ProductArt, type ProductArtKey } from "@/components/shared/product-art";
 import { SearchInput } from "@/components/shared/search-input";
 import { EmptyState } from "@/components/shared/empty-state";
+import { CatalogueImage, useCatalogueImages } from "@/components/shared/catalogue-image";
+import { CatalogueImageUploader } from "@/components/shared/catalogue-image-uploader";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/auth/env";
 import { formatDate, formatINR, formatNumber } from "@/lib/utils";
@@ -117,6 +119,10 @@ export function LiveRewardsPanel() {
   const [collectFor, setCollectFor] = React.useState<LiveRedemption | null>(null);
   const [cancelFor, setCancelFor] = React.useState<LiveRedemption | null>(null);
   const [issued, setIssued] = React.useState<RedeemOutcome | null>(null);
+  const [photoFor, setPhotoFor] = React.useState<LiveReward | null>(null);
+
+  const rewardIds = React.useMemo(() => rewards.map((r) => r.id), [rewards]);
+  const rewardImages = useCatalogueImages("reward", rewardIds);
   const [busyId, setBusyId] = React.useState<string | null>(null);
 
   const isManager = role === "owner" || role === "manager";
@@ -268,15 +274,9 @@ export function LiveRewardsPanel() {
             <Gift className="size-4.5" aria-hidden />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="flex flex-wrap items-center gap-2 text-sm font-semibold">
-              Live rewards &amp; redemptions
-              <Badge variant="outline" className="gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden /> Supabase
-              </Badge>
-            </h2>
+            <h2 className="text-sm font-semibold">Rewards &amp; redemptions</h2>
             <p className="text-xs text-muted-foreground">
-              {rewards.filter((r) => r.status === "active").length} live rewards · {pendingCount} pending pickups ·
-              codes are hashed — shown once at redeem time
+              {rewards.filter((r) => r.status === "active").length} active rewards · {pendingCount} pending pickups
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -338,7 +338,9 @@ export function LiveRewardsPanel() {
                 return (
                   <div key={r.id} className="rounded-xl border p-3.5">
                     <div className="flex items-start gap-3">
-                      <ProductArt art={(r.artKey ?? "gift") as ProductArtKey} className="size-12 shrink-0" tone="muted" />
+                      <div className="size-12 shrink-0 overflow-hidden rounded-lg">
+                        <CatalogueImage image={rewardImages.get(r.id) ?? null} name={r.name} artKey={r.artKey ?? "gift"} />
+                      </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-start justify-between gap-2">
                           <p className="text-sm font-medium leading-snug">{r.name}</p>
@@ -370,6 +372,9 @@ export function LiveRewardsPanel() {
                         <div className="flex items-center gap-1.5">
                           <Button size="sm" variant="ghost" onClick={() => setRewardDialog({ reward: r })}>Edit</Button>
                           <Button size="sm" variant="ghost" onClick={() => setStockFor(r)}>Stock</Button>
+                          <Button size="sm" variant="ghost" onClick={() => setPhotoFor(r)}>
+                            <ImagePlus /> Photo
+                          </Button>
                           <Button
                             size="sm"
                             variant="ghost"
@@ -488,6 +493,27 @@ export function LiveRewardsPanel() {
         />
       )}
       {issued && <CodeOnceDialog outcome={issued} onClose={() => setIssued(null)} />}
+      <FormDialog
+        open={photoFor !== null}
+        onOpenChange={(o) => { if (!o) setPhotoFor(null); }}
+        title={`Reward photo — ${photoFor?.name ?? ""}`}
+        description="Shown in the catalogue and the customer rewards store. Falls back to the standard illustration until a photo is uploaded."
+        footer={<Button variant="outline" onClick={() => setPhotoFor(null)}>Done</Button>}
+      >
+        {photoFor && (
+          <div className="py-2">
+            <CatalogueImageUploader
+              owner="reward"
+              ownerId={photoFor.id}
+              name={photoFor.name}
+              artKey={photoFor.artKey ?? "gift"}
+              image={rewardImages.get(photoFor.id) ?? null}
+              onChanged={reload}
+              size="h-24 w-24"
+            />
+          </div>
+        )}
+      </FormDialog>
     </div>
   );
 }

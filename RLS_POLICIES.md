@@ -80,9 +80,21 @@ existed, the direct paths were a way to change tenant configuration without leav
 and an audit trail with a legitimate bypass is not an audit trail. This was found by
 `scripts/ci/validate-migrations.mjs`, not by a human reading the grants. `points_ledger` and `customer_points_balance` are SELECT-only at grant level; every
 write path is an RPC. No DELETE grants exist anywhere. `anon` receives nothing; new tables default to
-no-grant (`ALTER DEFAULT PRIVILEGES … REVOKE`). `service_role` retains full access for trusted
-server operations and **must never appear in a browser bundle** (enforced by `server-only` imports
-in `src/lib/supabase/admin.ts`).
+no-grant (`ALTER DEFAULT PRIVILEGES … REVOKE`). `service_role` retains full read/write access for
+trusted server operations and **must never appear in a browser bundle** (enforced by `server-only`
+imports in `src/lib/supabase/admin.ts`) — with one deliberate carve-out: on the five append-only
+tables (`points_ledger`, `audit_logs`, `inventory_movements`, `qr_verification_attempts`,
+`loyalty_rule_versions`), `service_role` holds SELECT/INSERT/UPDATE/DELETE but **not** TRUNCATE,
+TRIGGER or REFERENCES (`20260907010000_revoke_append_only_truncate.sql`). Those three are DDL-only
+privileges the application never legitimately needs, and `all`-style grants used on four of the five
+tables had included them by accident — TRUNCATE in particular bypasses the row-level immutability
+triggers entirely (a statement-level operation, not a row-level UPDATE/DELETE), so a role holding it
+could wipe an append-only table in one statement despite every other protection. UPDATE/DELETE were
+already, and remain, rejected by the tables' own triggers regardless of grants. The one thing no
+`REVOKE` can touch: `postgres` (or any real table owner/superuser) can always `TRUNCATE` or
+`ALTER TABLE ... DISABLE TRIGGER` on its own tables — an inherent property of PostgreSQL ownership,
+not a gap in this schema, and the same ceiling `MVP_HANDOFF.md` §8 already describes for the
+trigger-EXECUTE hardening.
 
 ## 4. Server-authorized operations (RPC) and their audit events
 
@@ -295,6 +307,15 @@ harness database with stubs for the pgTAP subset it uses (plan/is/ok/matches/liv
   object with no metadata row is invisible to the application. The upload action additionally
   sniffs magic bytes and refuses when they disagree with the declared type — a `Content-Type`
   header and a file extension are both attacker-controlled.
+  **Known trade-off:** the read policy is `to public` with no path scoping, which means anyone —
+  including an unauthenticated caller — can list objects in these two buckets via the Storage list
+  API. Since paths are `<business_id>/<owner_id>/<uuid>.<ext>`, this lets an outsider enumerate
+  every tenant's `business_id` and product/reward UUIDs, and infer catalogue size, from path
+  metadata alone. No RLS-protected data is reachable this way (every other resource still keys off
+  real membership, never off "knowing a UUID"), but the enumeration itself is real and currently
+  undisclosed anywhere else. Accepted for MVP because signing URLs would cost CDN caching and
+  confidentiality was never the goal for these two buckets specifically — revisit if UUID
+  enumeration becomes a concern (e.g. a competitor scraping catalogue size).
 - Manager scoped permissions (e.g. managing staff for assigned stores) are **not** granted by
   default — “never owner-only controls unless explicitly granted” (spec 2.x). Extending managers
   means adding an explicit policy/RPC guard in a reviewed migration.

@@ -80,8 +80,8 @@ export function AcceptInvitationCard(props: AcceptInvitationCardProps) {
       <Panel
         icon={<Info className="size-6" />}
         tone="info"
-        title="Demo mode"
-        body="Real staff invitations activate once Supabase is configured (see SETUP_SUPABASE_AND_RESEND.md). In this prototype the Staff page demonstrates the invitation workflow with mock data."
+        title="Staff Invitation"
+        body="Staff invitations activate with an active deployment session. Sign in to view and manage team invitations."
       >
         <Button asChild size="lg" className="mt-5 w-full">
           <Link href="/login">Back to sign in</Link>

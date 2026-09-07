@@ -17,52 +17,75 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { CampaignWizard } from "@/components/business/campaign-wizard";
 import { useStore } from "@/lib/store";
 import { useServices } from "@/lib/services";
+import { useLiveCampaigns } from "@/lib/campaigns/use-live-campaigns";
 import { formatDate, formatINR, formatNumber } from "@/lib/utils";
 
 export default function CampaignsPage() {
   const { state } = useStore();
   const { campaignService } = useServices();
+  const live = useLiveCampaigns();
+  const configured = live.configured;
   const [tab, setTab] = React.useState("all");
   const [wizardOpen, setWizardOpen] = React.useState(false);
 
-  const results = state.campaigns.filter((c) => tab === "all" || c.status.toLowerCase() === tab);
+  interface ViewCampaign {
+    id: string; name: string; description: string; audience: string; reward: string;
+    status: "Active" | "Scheduled" | "Draft" | "Ended"; startDate: string; endDate: string;
+    reach: number; redemptions: number; revenue: number;
+  }
+  const STATUS_LABEL: Record<string, ViewCampaign["status"]> = {
+    draft: "Draft", scheduled: "Scheduled", active: "Active", ended: "Ended",
+  };
+  const all: ViewCampaign[] = configured
+    ? live.items.map((c) => ({
+        id: c.id, name: c.name, description: c.description ?? "", audience: c.audience, reward: c.reward,
+        status: STATUS_LABEL[c.status], startDate: c.startsAt, endDate: c.endsAt,
+        reach: live.activeMembers, redemptions: 0, revenue: 0,
+      }))
+    : state.campaigns;
 
-  const totals = React.useMemo(() => {
-    const cs = state.campaigns;
-    return {
-      active: cs.filter((c) => c.status === "Active").length,
-      reach: cs.reduce((s, c) => s + c.reach, 0),
-      redemptions: cs.reduce((s, c) => s + c.redemptions, 0),
-      revenue: cs.reduce((s, c) => s + c.revenue, 0),
-    };
-  }, [state.campaigns]);
+  const results = all.filter((c) => tab === "all" || c.status.toLowerCase() === tab);
+
+  const totals = {
+    active: all.filter((c) => c.status === "Active").length,
+    reach: all.reduce((s, c) => s + c.reach, 0),
+    redemptions: all.reduce((s, c) => s + c.redemptions, 0),
+    revenue: all.reduce((s, c) => s + c.revenue, 0),
+  };
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title="Campaigns"
-        description="Run targeted point offers to bring members back into store."
-        actions={<Button onClick={() => setWizardOpen(true)}><Plus /> Create Campaign</Button>}
-      />
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <PageHeader
+          title="Campaigns"
+          description="Run targeted point offers to bring members back into store."
+          actions={<Button onClick={() => setWizardOpen(true)}><Plus /> Create Campaign</Button>}
+        />
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Active campaigns" value={String(totals.active)} icon={Megaphone} />
-        <StatCard label="Total reach" value={formatNumber(totals.reach)} icon={Users} />
-        <StatCard label="Redemptions" value={formatNumber(totals.redemptions)} icon={Target} />
-        <StatCard label="Attributed revenue" value={formatINR(totals.revenue)} icon={TrendingUp} />
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <StatCard label="Active campaigns" value={String(totals.active)} icon={Megaphone} />
+          <StatCard label="Total reach" value={formatNumber(totals.reach)} icon={Users} />
+          <StatCard label="Redemptions" value={formatNumber(totals.redemptions)} icon={Target} />
+          <StatCard label="Attributed revenue" value={formatINR(totals.revenue)} icon={TrendingUp} />
+        </div>
+
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList>
+            <TabsTrigger value="all">All</TabsTrigger>
+            <TabsTrigger value="active">Active</TabsTrigger>
+            <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
+            <TabsTrigger value="draft">Draft</TabsTrigger>
+            <TabsTrigger value="ended">Ended</TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
 
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="all">All</TabsTrigger>
-          <TabsTrigger value="active">Active</TabsTrigger>
-          <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
-          <TabsTrigger value="draft">Draft</TabsTrigger>
-          <TabsTrigger value="ended">Ended</TabsTrigger>
-        </TabsList>
-      </Tabs>
-
-      {results.length === 0 ? (
+      {configured && live.loading ? (
+        <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+          <span className="size-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary" />
+          Loading campaigns…
+        </div>
+      ) : results.length === 0 ? (
         <EmptyState
           icon={Megaphone}
           title="No campaigns here yet."
@@ -70,7 +93,7 @@ export default function CampaignsPage() {
           action={<Button onClick={() => setWizardOpen(true)}><Plus /> Create campaign</Button>}
         />
       ) : (
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-3 lg:grid-cols-2 flex-1 min-h-0 overflow-y-auto scroll-region p-1">
           {results.map((c, i) => {
             const conversion = c.reach ? Math.round((c.redemptions / c.reach) * 100) : 0;
             return (
@@ -125,8 +148,13 @@ export default function CampaignsPage() {
                         variant="outline"
                         size="sm"
                         onClick={async () => {
-                          await campaignService.updateCampaign(c.id, { status: "Ended" });
-                          toast.success(`${c.name} ended.`);
+                          try {
+                            if (configured) await live.setStatus(c.id, "ended");
+                            else await campaignService.updateCampaign(c.id, { status: "Ended" });
+                            toast.success(`${c.name} ended.`);
+                          } catch (err) {
+                            toast.error("Couldn't end the campaign", { description: err instanceof Error ? err.message : "Please try again." });
+                          }
                         }}
                       >
                         <Pause /> End campaign
@@ -135,8 +163,13 @@ export default function CampaignsPage() {
                       <Button
                         size="sm"
                         onClick={async () => {
-                          await campaignService.updateCampaign(c.id, { status: "Active" });
-                          toast.success(`${c.name} is now live.`);
+                          try {
+                            if (configured) await live.setStatus(c.id, "active");
+                            else await campaignService.updateCampaign(c.id, { status: "Active" });
+                            toast.success(`${c.name} is now live.`);
+                          } catch (err) {
+                            toast.error("Couldn't activate the campaign", { description: err instanceof Error ? err.message : "Please try again." });
+                          }
                         }}
                       >
                         <Play /> Activate

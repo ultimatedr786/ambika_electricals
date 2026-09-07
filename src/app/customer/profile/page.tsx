@@ -27,6 +27,9 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { useCurrentCustomer } from "@/lib/store";
 import { useServices } from "@/lib/services";
 import { formatDate, initials } from "@/lib/utils";
+import { isSupabaseConfigured } from "@/lib/auth/env";
+import { createClient } from "@/lib/supabase/client";
+import { tierProgress } from "@/lib/points";
 
 const schema = z.object({
   name: z.string().min(2, "Enter your full name"),
@@ -36,10 +39,118 @@ const schema = z.object({
 });
 type Values = z.infer<typeof schema>;
 
+interface LiveProfile {
+  name: string;
+  phone: string;
+  email: string;
+  membershipId: string;
+  memberSince: string;
+  store: string;
+  lifetimePoints: number;
+  businessId: string | null;
+  mutedCategories: string[];
+}
+
+function useLiveProfile() {
+  const configured = isSupabaseConfigured();
+  const supabase = React.useMemo(() => createClient(), []);
+  const [profile, setProfile] = React.useState<LiveProfile | null>(null);
+  const [loading, setLoading] = React.useState(configured);
+
+  const reload = React.useCallback(async () => {
+    if (!configured || !supabase) return;
+    setLoading(true);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+    const [profRes, memRes] = await Promise.all([
+      supabase.from("profiles").select("display_name, email, phone, created_at").eq("id", user.id).maybeSingle(),
+      supabase
+        .from("customer_memberships")
+        .select("id, business_id, membership_no, enrolled_at, enrolled_store_id, stores(name)")
+        .eq("profile_id", user.id)
+        .eq("status", "active")
+        .order("enrolled_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+    const p = profRes.data as { display_name: string | null; email: string; phone: string | null; created_at: string } | null;
+    const m = memRes.data as unknown as { id: string; business_id: string; membership_no: string; enrolled_at: string; stores: { name: string } | null } | null;
+    const [balRes, prefRes] = await Promise.all([
+      m ? supabase.from("customer_points_balance").select("lifetime_earned").eq("customer_membership_id", m.id).maybeSingle() : Promise.resolve(null),
+      m ? supabase.from("notification_preferences").select("muted_categories").eq("business_id", m.business_id).maybeSingle() : Promise.resolve(null),
+    ]);
+    if (p) {
+      setProfile({
+        name: p.display_name ?? "",
+        phone: p.phone ?? "",
+        email: p.email,
+        membershipId: m?.membership_no ?? "—",
+        memberSince: m?.enrolled_at ?? p.created_at,
+        store: m?.stores?.name ?? "Home store",
+        lifetimePoints: Number((balRes?.data as { lifetime_earned: number } | null)?.lifetime_earned ?? 0),
+        businessId: m?.business_id ?? null,
+        mutedCategories: ((prefRes?.data as { muted_categories: string[] } | null)?.muted_categories ?? []),
+      });
+    }
+    setLoading(false);
+  }, [configured, supabase]);
+
+  React.useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const save = React.useCallback(
+    async (values: { name: string; phone: string }) => {
+      if (!supabase) return;
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      const { error } = await supabase
+        .from("profiles")
+        .update({ display_name: values.name, phone: values.phone })
+        .eq("id", user.id);
+      if (error) throw error;
+      await reload();
+    },
+    [supabase, reload]
+  );
+
+  const setMuted = React.useCallback(
+    async (category: string, muted: boolean) => {
+      if (!supabase || !profile?.businessId) return;
+      const next = muted
+        ? [...new Set([...profile.mutedCategories, category])]
+        : profile.mutedCategories.filter((c) => c !== category);
+      setProfile((p) => (p ? { ...p, mutedCategories: next } : p));
+      const { error } = await supabase.rpc("set_notification_preferences", {
+        p_business_id: profile.businessId,
+        p_muted_categories: next,
+      });
+      if (error) await reload();
+    },
+    [supabase, profile, reload]
+  );
+
+  return { configured, profile, loading, save, setMuted };
+}
+
 export default function ProfilePage() {
   const router = useRouter();
-  const customer = useCurrentCustomer();
+  const mockCustomer = useCurrentCustomer();
+  const live = useLiveProfile();
+  const configured = live.configured;
+  const customer = configured
+    ? live.profile ?? { name: "", phone: "", email: "", membershipId: "—", memberSince: new Date().toISOString(), store: "—", lifetimePoints: 0, businessId: null, mutedCategories: [] }
+    : mockCustomer;
+  const tier = configured ? tierProgress(customer.lifetimePoints).current.name : mockCustomer.tier;
   const { customerService, authService } = useServices();
+  const supabase = React.useMemo(() => createClient(), []);
   const { theme, setTheme } = useTheme();
   const [editing, setEditing] = React.useState(false);
   const [signOutOpen, setSignOutOpen] = React.useState(false);
@@ -51,18 +162,22 @@ export default function ProfilePage() {
       name: customer.name,
       phone: customer.phone,
       email: customer.email,
-      birthday: customer.birthday ?? "",
+      birthday: configured ? "" : (mockCustomer.birthday ?? ""),
     },
   });
 
   const save = form.handleSubmit(async (values) => {
-    await customerService.updateCustomer(customer.id, values);
+    if (configured) {
+      await live.save({ name: values.name, phone: values.phone });
+    } else {
+      await customerService.updateCustomer(mockCustomer.id, values);
+    }
     setEditing(false);
-    toast.success("Customer updated", { description: "Your profile details have been saved." });
+    toast.success("Profile updated", { description: "Your profile details have been saved." });
   });
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 flex-1 min-h-0 overflow-y-auto scroll-region pb-6 pr-1">
       <PageHeader title="Profile" description="Your details, preferences and account settings." />
 
       <Card className="flex flex-wrap items-center gap-4 p-5">
@@ -70,9 +185,9 @@ export default function ProfilePage() {
           <AvatarFallback className="text-base">{initials(customer.name)}</AvatarFallback>
         </Avatar>
         <div className="min-w-0 flex-1">
-          <p className="text-lg font-semibold">{customer.name}</p>
+          <p className="text-lg font-semibold">{customer.name || "—"}</p>
           <p className="text-sm tabular text-muted-foreground">{customer.membershipId}</p>
-          <div className="mt-1.5"><TierBadge tier={customer.tier} /></div>
+          <div className="mt-1.5"><TierBadge tier={tier} /></div>
         </div>
         <Button variant="outline" onClick={() => setEditing(true)}><Pencil /> Edit profile</Button>
       </Card>
@@ -80,25 +195,43 @@ export default function ProfilePage() {
       <Card className="p-5">
         <h2 className="text-base font-semibold">Personal details</h2>
         <dl className="mt-3.5 grid gap-3 sm:grid-cols-2">
-          <Detail icon={UserRound} label="Name" value={customer.name} />
-          <Detail icon={Phone} label="Phone" value={customer.phone} />
+          <Detail icon={UserRound} label="Name" value={customer.name || "Not added"} />
+          <Detail icon={Phone} label="Phone" value={customer.phone || "Not added"} />
           <Detail icon={Mail} label="Email" value={customer.email} />
-          <Detail icon={Sparkles} label="Birthday" value={customer.birthday ? formatDate(customer.birthday, "long") : "Not added"} />
+          {!configured && (
+            <Detail icon={Sparkles} label="Birthday" value={mockCustomer.birthday ? formatDate(mockCustomer.birthday, "long") : "Not added"} />
+          )}
           <Detail icon={Shield} label="Member since" value={formatDate(customer.memberSince, "long")} />
-          <Detail icon={UserRound} label="Home store" value={`Ambika Electricals — ${customer.store}`} />
+          <Detail icon={UserRound} label="Home store" value={configured ? customer.store : `Ambika Electricals — ${customer.store}`} />
         </dl>
       </Card>
 
       <Card className="p-5">
         <h2 className="flex items-center gap-2 text-base font-semibold"><Bell className="size-4" /> Notifications</h2>
         <div className="mt-3.5 space-y-1">
-          <Toggle label="Points and purchase updates" checked={prefs.points} onChange={(v) => setPrefs((p) => ({ ...p, points: v }))} />
+          <Toggle
+            label="Points and purchase updates"
+            checked={configured ? !(live.profile?.mutedCategories ?? []).includes("points") : prefs.points}
+            onChange={(v) => (configured ? void live.setMuted("points", !v) : setPrefs((p) => ({ ...p, points: v })))}
+          />
+          {!configured && (
+            <>
+              <Separator />
+              <Toggle label="Offers and campaigns" checked={prefs.offers} onChange={(v) => setPrefs((p) => ({ ...p, offers: v }))} />
+            </>
+          )}
           <Separator />
-          <Toggle label="Offers and campaigns" checked={prefs.offers} onChange={(v) => setPrefs((p) => ({ ...p, offers: v }))} />
-          <Separator />
-          <Toggle label="Reward expiry reminders" checked={prefs.expiry} onChange={(v) => setPrefs((p) => ({ ...p, expiry: v }))} />
-          <Separator />
-          <Toggle label="WhatsApp updates" checked={prefs.whatsapp} onChange={(v) => setPrefs((p) => ({ ...p, whatsapp: v }))} />
+          <Toggle
+            label="Reward expiry reminders"
+            checked={configured ? !(live.profile?.mutedCategories ?? []).includes("reward") : prefs.expiry}
+            onChange={(v) => (configured ? void live.setMuted("reward", !v) : setPrefs((p) => ({ ...p, expiry: v })))}
+          />
+          {!configured && (
+            <>
+              <Separator />
+              <Toggle label="WhatsApp updates" checked={prefs.whatsapp} onChange={(v) => setPrefs((p) => ({ ...p, whatsapp: v }))} />
+            </>
+          )}
         </div>
       </Card>
 
@@ -125,7 +258,7 @@ export default function ProfilePage() {
       </Card>
 
       <Card className="divide-y">
-        <LinkRow icon={Shield} label="Security" hint="Password and sign-in" onClick={() => toast.info("Security settings are UI only in this prototype.")} />
+        <LinkRow icon={Shield} label="Security" hint="Password and sign-in" onClick={() => toast.info(configured ? "Use “Forgot password” from the login screen to change your password." : "Security settings are UI only in this prototype.")} />
         <LinkRow icon={HelpCircle} label="Help & support" hint="+91 98250 41200" onClick={() => toast.info("Call the store on +91 98250 41200 for help.")} />
         <LinkRow icon={LogOut} label="Sign out" onClick={() => setSignOutOpen(true)} destructive />
       </Card>
@@ -156,13 +289,15 @@ export default function ProfilePage() {
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="p-email">Email</Label>
-              <Input id="p-email" type="email" {...form.register("email")} />
+              <Input id="p-email" type="email" readOnly={configured} {...form.register("email")} />
               {form.formState.errors.email && <p className="text-xs text-destructive">{form.formState.errors.email.message}</p>}
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="p-bday">Birthday</Label>
-              <Input id="p-bday" type="date" {...form.register("birthday")} />
-            </div>
+            {!configured && (
+              <div className="space-y-1.5">
+                <Label htmlFor="p-bday">Birthday</Label>
+                <Input id="p-bday" type="date" {...form.register("birthday")} />
+              </div>
+            )}
           </div>
       </FormDialog>
 
@@ -172,7 +307,11 @@ export default function ProfilePage() {
         title="Sign out of Rewardly?"
         description="You'll need to sign in again to view your points and rewards."
         confirmLabel="Sign out"
-        onConfirm={() => { authService.signOut(); router.push("/login"); }}
+        onConfirm={async () => {
+          if (configured && supabase) await supabase.auth.signOut();
+          authService.signOut();
+          router.push("/login");
+        }}
       />
     </div>
   );

@@ -90,9 +90,7 @@ export function ResetPasswordForm({ next }: { next?: string | null }) {
         </div>
         <h2 className="mt-4 text-lg font-semibold tracking-tight">No active reset session</h2>
         <p className="mt-1.5 text-sm text-muted-foreground">
-          {realAuth
-            ? "Password resets start from the email link, which expires after an hour. Request a fresh one to continue."
-            : "This is the demo prototype — passwords are fixed (Demo@123). In the real deployment this page is reached from the reset email."}
+          Password resets start from the recovery email link, which expires after an hour. Request a fresh one to continue.
         </p>
         <Button asChild size="lg" className="mt-5 w-full">
           <Link href="/forgot-password"><KeyRound className="mr-1.5 size-4" /> Request a reset email</Link>

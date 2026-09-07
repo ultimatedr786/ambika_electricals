@@ -42,7 +42,7 @@ const SelectContent = React.forwardRef<
       {...props}
     >
       <SelectPrimitive.ScrollUpButton className="flex h-6 items-center justify-center"><ChevronUp className="size-4" /></SelectPrimitive.ScrollUpButton>
-      <SelectPrimitive.Viewport className="p-1.5">{children}</SelectPrimitive.Viewport>
+      <SelectPrimitive.Viewport className="p-1.5 scroll-region max-h-60">{children}</SelectPrimitive.Viewport>
       <SelectPrimitive.ScrollDownButton className="flex h-6 items-center justify-center"><ChevronDown className="size-4" /></SelectPrimitive.ScrollDownButton>
     </SelectPrimitive.Content>
   </SelectPrimitive.Portal>

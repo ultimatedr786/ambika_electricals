@@ -25,6 +25,13 @@ const pg = new EmbeddedPostgres({
   password: "postgres",
   port,
   persistent: true,
+  // Windows' default initdb locale (e.g. "English_United States") maps to the
+  // WIN1252 server encoding, which cannot store several UTF-8 characters used
+  // in migration comments (e.g. the U+21C4 arrow in
+  // 20260905120000_auth_foundation_schema.sql) and breaks the very first
+  // migration apply. Force UTF8/C so the cluster matches what every hosted
+  // Supabase project and the CI Linux runners already use.
+  initdbFlags: ["--encoding=UTF8", "--locale=C"],
 });
 
 try {

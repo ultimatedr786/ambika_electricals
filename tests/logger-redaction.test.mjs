@@ -103,3 +103,50 @@ test("long arrays are truncated rather than flooding the log", () => {
   assert.equal(out.length, 51);
   assert.match(String(out[50]), /truncated:70 more/);
 });
+
+test("a secret embedded inside a larger string is redacted, not just a bare secret value", () => {
+  const out = redact({
+    note: `retry failed for RWD1.0123456789ABCDEF.ZYXWVTSRQPNMKJHGFEDCBA9876 at counter 3`,
+  });
+  assert.equal(out.note, "retry failed for [REDACTED:qr-token] at counter 3");
+});
+
+test("a JWT embedded in a URL is redacted in place, and the rest of the URL survives", () => {
+  const out = redact({
+    url: `https://api.example.com/callback?token=${JWT}&next=/dashboard`,
+  });
+  assert.equal(out.url, "https://api.example.com/callback?token=[REDACTED:jwt]&next=/dashboard");
+});
+
+test("a QR token embedded in a sentence is redacted, unlike the anchored-only check", () => {
+  const out = redact({ message: `scanned: ${QR} at counter 3` });
+  assert.equal(out.message, "scanned: [REDACTED:qr-token] at counter 3");
+});
+
+test("a stringified JSON blob containing sensitive keys is parsed and redacted, not logged verbatim", () => {
+  const blob = JSON.stringify({ token: "abc123", user: "rahul", contact: "rahul@example.com" });
+  const out = redact({ payload: blob });
+  const parsedBack = JSON.parse(out.payload);
+  assert.equal(parsedBack.token, "[REDACTED]", "key match still applies inside the parsed blob");
+  assert.equal(parsedBack.contact, "[REDACTED:email]", "shape match still applies inside the parsed blob");
+  assert.equal(parsedBack.user, "rahul", "non-sensitive fields survive");
+});
+
+test("a GSTIN is redacted by shape even under an unexpected key name", () => {
+  const out = redact({ taxId: "27ABCDE1234F1Z5", note: `registration 27ABCDE1234F1Z5 on file` });
+  assert.equal(out.taxId, "[REDACTED:gstin]");
+  assert.equal(out.note, "registration [REDACTED:gstin] on file");
+});
+
+test("embedded-pattern redaction does not over-redact ordinary IDs or harmless strings", () => {
+  const out = redact({
+    invoiceNo: "INV-000123",
+    storeId: "bbbbbbbb-0000-4000-8000-000000000001",
+    note: "order 9876543210123 shipped in 2 boxes", // a longer digit run, not a bare phone number
+    sentence: "Please call the shop between 10 and 6 on weekdays.",
+  });
+  assert.equal(out.invoiceNo, "INV-000123");
+  assert.equal(out.storeId, "bbbbbbbb-0000-4000-8000-000000000001");
+  assert.equal(out.note, "order 9876543210123 shipped in 2 boxes", "a longer digit run must not be mistaken for a phone number");
+  assert.equal(out.sentence, "Please call the shop between 10 and 6 on weekdays.");
+});

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Ban, Receipt, Sparkles, Store, UserRound } from "lucide-react";
+import { Ban, Receipt, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { FormDialog } from "@/components/shared/form-dialog";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/auth/env";
-import { formatINR, relativeTime } from "@/lib/utils";
+import { formatINR, formatTime } from "@/lib/utils";
 import { voidSaleAction } from "@/app/business/(app)/sales/sales-actions";
 
 /**
@@ -35,6 +35,8 @@ interface LiveSaleRow {
   storeId: string;
   membershipId: string | null;
   membershipNo: string | null;
+  customerName: string | null;
+  items: { name: string; qty: number }[];
   soldBy: string | null;
   voidReason: string | null;
 }
@@ -79,42 +81,49 @@ export function LiveSalesPanel() {
       const [salesRes, storesRes] = await Promise.all([
         supabase
           .from("sales")
-          .select("id, invoice_no, status, total_paise, total_points, sold_at, store_id, customer_membership_id, sold_by_profile_id, void_reason")
+          .select("id, invoice_no, status, total_paise, total_points, sold_at, store_id, customer_membership_id, sold_by_profile_id, void_reason, sale_items(name_snapshot, qty)")
           .eq("business_id", bid)
           .order("sold_at", { ascending: false })
           .limit(12),
         supabase.from("stores").select("id, name").eq("business_id", bid),
       ]);
 
-      const saleRows = (salesRes.data ?? []) as {
-        id: string; invoice_no: string; status: "completed" | "voided" | "refunded";
-        total_paise: number; total_points: number; sold_at: string; store_id: string;
-        customer_membership_id: string | null; sold_by_profile_id: string | null; void_reason: string | null;
-      }[];
+      const saleRows = ((salesRes.data ?? []) as unknown as Record<string, unknown>[]).map((s) => ({
+        id: String(s.id), invoice_no: String(s.invoice_no), status: s.status as "completed" | "voided" | "refunded",
+        total_paise: Number(s.total_paise), total_points: Number(s.total_points), sold_at: String(s.sold_at),
+        store_id: String(s.store_id), customer_membership_id: s.customer_membership_id as string | null,
+        sold_by_profile_id: s.sold_by_profile_id as string | null, void_reason: s.void_reason as string | null,
+        sale_items: (s.sale_items ?? []) as { name_snapshot: string; qty: number }[],
+      }));
 
       const membershipIds = [...new Set(saleRows.map((s) => s.customer_membership_id).filter((x): x is string => !!x))];
       const { data: memRes } = membershipIds.length
-        ? await supabase.from("customer_memberships").select("id, membership_no").in("id", membershipIds)
+        ? await supabase.from("customer_memberships").select("id, membership_no, display_name").in("id", membershipIds)
         : { data: [] };
       const memMap = new Map(
-        ((memRes ?? []) as { id: string; membership_no: string }[]).map((m) => [m.id, m.membership_no])
+        ((memRes ?? []) as { id: string; membership_no: string; display_name: string | null }[]).map((m) => [m.id, m])
       );
 
       setStoreNames(new Map(((storesRes.data ?? []) as { id: string; name: string }[]).map((s) => [s.id, s.name])));
       setSales(
-        saleRows.map((s) => ({
-          id: s.id,
-          invoiceNo: s.invoice_no,
-          status: s.status,
-          totalPaise: Number(s.total_paise),
-          totalPoints: Number(s.total_points),
-          soldAt: s.sold_at,
-          storeId: s.store_id,
-          membershipId: s.customer_membership_id,
-          membershipNo: s.customer_membership_id ? memMap.get(s.customer_membership_id) ?? null : null,
-          soldBy: s.sold_by_profile_id,
-          voidReason: s.void_reason,
-        }))
+        saleRows.map((s) => {
+          const mem = s.customer_membership_id ? memMap.get(s.customer_membership_id) : undefined;
+          return {
+            id: s.id,
+            invoiceNo: s.invoice_no,
+            status: s.status,
+            totalPaise: Number(s.total_paise),
+            totalPoints: Number(s.total_points),
+            soldAt: s.sold_at,
+            storeId: s.store_id,
+            membershipId: s.customer_membership_id,
+            membershipNo: mem?.membership_no ?? null,
+            customerName: mem?.display_name ?? null,
+            items: s.sale_items.map((i) => ({ name: i.name_snapshot, qty: Number(i.qty) })),
+            soldBy: s.sold_by_profile_id,
+            voidReason: s.void_reason,
+          };
+        })
       );
     } finally {
       setLoading(false);
@@ -173,12 +182,7 @@ export function LiveSalesPanel() {
             <Receipt className="size-4.5" />
           </span>
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold">
-              Live sales
-              <Badge variant="outline" className="gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden /> Supabase
-              </Badge>
-            </h2>
+            <h2 className="text-sm font-semibold">Sales</h2>
             <p className="text-xs text-muted-foreground">
               Newest recorded sales — rows are never deleted; voiding flips the status and reverses points
             </p>
@@ -197,20 +201,28 @@ export function LiveSalesPanel() {
             <TableRow>
               <TableHead>Invoice</TableHead>
               <TableHead>Customer</TableHead>
-              <TableHead className="hidden sm:table-cell">Store</TableHead>
-              <TableHead className="text-right">Total</TableHead>
-              <TableHead className="hidden text-right md:table-cell">Points</TableHead>
+              <TableHead>Products</TableHead>
+              <TableHead className="text-right">Amount</TableHead>
+              <TableHead className="text-right">Points</TableHead>
+              <TableHead>Store</TableHead>
               <TableHead>Status</TableHead>
-              <TableHead className="hidden lg:table-cell">When</TableHead>
               {canVoid && <TableHead className="text-right">Actions</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
             {sales.map((s) => (
               <TableRow key={s.id} className={s.status !== "completed" ? "opacity-60" : undefined}>
-                <TableCell className="font-mono text-xs">{s.invoiceNo}</TableCell>
+                <TableCell className="font-medium tabular">
+                  {s.invoiceNo}
+                  <p className="mt-0.5 text-xs font-normal text-muted-foreground">{formatTime(s.soldAt)}</p>
+                </TableCell>
                 <TableCell>
-                  {s.membershipNo ? (
+                  {s.customerName ? (
+                    <span className="flex items-center gap-1.5 text-sm">
+                      <UserRound className="size-3.5 text-muted-foreground" aria-hidden />
+                      {s.customerName}
+                    </span>
+                  ) : s.membershipNo ? (
                     <span className="flex items-center gap-1.5 text-xs">
                       <UserRound className="size-3.5 text-muted-foreground" aria-hidden />
                       <span className="font-mono">{s.membershipNo}</span>
@@ -219,21 +231,20 @@ export function LiveSalesPanel() {
                     <span className="text-xs text-muted-foreground">Walk-in</span>
                   )}
                 </TableCell>
-                <TableCell className="hidden sm:table-cell">
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Store className="size-3.5" aria-hidden /> {storeNames.get(s.storeId) ?? "Store"}
-                  </span>
+                <TableCell className="max-w-[240px] truncate text-muted-foreground">
+                  {s.items.length > 0 ? s.items.map((i) => `${i.qty} × ${i.name}`).join(", ") : "—"}
                 </TableCell>
-                <TableCell className="text-right text-sm font-medium">{formatINR(s.totalPaise / 100)}</TableCell>
-                <TableCell className="hidden text-right md:table-cell">
+                <TableCell className="text-right font-medium tabular">{formatINR(s.totalPaise / 100)}</TableCell>
+                <TableCell className="text-right tabular">
                   {s.totalPoints > 0 ? (
-                    <span className="flex items-center justify-end gap-1 text-xs text-emerald-600 dark:text-emerald-400">
-                      <Sparkles className="size-3" aria-hidden /> {s.totalPoints}
+                    <span className="flex items-center justify-end gap-1 text-success">
+                      +{s.totalPoints}
                     </span>
                   ) : (
-                    <span className="text-xs text-muted-foreground">—</span>
+                    <span className="text-muted-foreground">—</span>
                   )}
                 </TableCell>
+                <TableCell className="text-muted-foreground">{storeNames.get(s.storeId) ?? "Store"}</TableCell>
                 <TableCell>
                   <Badge
                     variant={s.status === "completed" ? "secondary" : "outline"}
@@ -242,9 +253,6 @@ export function LiveSalesPanel() {
                   >
                     {s.status}
                   </Badge>
-                </TableCell>
-                <TableCell className="hidden text-xs text-muted-foreground lg:table-cell">
-                  {relativeTime(s.soldAt)}
                 </TableCell>
                 {canVoid && (
                   <TableCell className="text-right">

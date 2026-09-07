@@ -142,113 +142,114 @@ export default function RewardsStorePage() {
   );
 
   return (
-    <div className="space-y-5">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Rewards Store</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Use your points on products, discounts and exclusive member offers.
-          </p>
-        </div>
-        <Button asChild variant="outline" className="relative">
-          <Link href="/customer/rewards/cart">
-            <ShoppingBag /> Basket
-            {cartService.count > 0 && <Badge className="ml-1">{cartService.count}</Badge>}
-          </Link>
-        </Button>
-      </header>
+    <div className="space-y-4 flex-1 min-h-0 flex flex-col">
+      <div className="space-y-4 shrink-0">
+        <header className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Rewards Store</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Use your points on products, discounts and exclusive member offers.
+            </p>
+          </div>
+          {!isSupabaseConfigured() && (
+            <Button asChild variant="outline" className="relative">
+              <Link href="/customer/rewards/cart">
+                <ShoppingBag /> Basket
+                {cartService.count > 0 && <Badge className="ml-1">{cartService.count}</Badge>}
+              </Link>
+            </Button>
+          )}
+        </header>
 
+        {!isSupabaseConfigured() && (
+          <>
+            {/* Points banner */}
+            <Card className="flex flex-wrap items-center justify-between gap-4 bg-gradient-to-r from-accent/70 to-accent/20 p-4 sm:p-5">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">Your balance</p>
+                <p className="mt-1 text-2xl font-semibold tabular sm:text-3xl">
+                  {formatNumber(customer.points)} <span className="text-base font-normal text-muted-foreground">points</span>
+                </p>
+                <p className="mt-0.5 flex items-center gap-1.5 text-sm text-muted-foreground">
+                  Worth approximately ₹{formatNumber(pointsToRupees(customer.points))}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button type="button" aria-label="How point value works"><Info className="size-3.5" /></button>
+                    </TooltipTrigger>
+                    <TooltipContent>Reward value depends on the offer.</TooltipContent>
+                  </Tooltip>
+                </p>
+              </div>
+              <WaysToEarnSheet
+                trigger={<Button variant="secondary" size="sm">See ways to earn</Button>}
+              />
+            </Card>
+
+            {/* Search + sort */}
+            <div className="flex flex-wrap items-center gap-2.5">
+              <SearchInput
+                value={query}
+                onChange={setQuery}
+                placeholder="Search LED, switch, socket, MCB, wire…"
+                className="min-w-[200px] flex-1"
+                aria-label="Search rewards"
+              />
+              <Select value={sort} onValueChange={setSort}>
+                <SelectTrigger className="w-[160px]" aria-label="Sort rewards">
+                  <SlidersHorizontal className="size-4 text-muted-foreground" />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {sorts.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Sheet>
+                <SheetTrigger asChild>
+                  <Button variant="outline" className="lg:hidden">
+                    <Filter /> Filters
+                    {activeFilterCount > 0 && <Badge className="ml-1">{activeFilterCount}</Badge>}
+                  </Button>
+                </SheetTrigger>
+                <SheetContent side="bottom" className="max-h-[85dvh]">
+                  <SheetHeader><SheetTitle>Filters</SheetTitle></SheetHeader>
+                  <SheetBody className="pb-8">{filterPanel}</SheetBody>
+                </SheetContent>
+              </Sheet>
+            </div>
+
+            {/* Category tabs */}
+            <div className="-mx-4 overflow-x-auto px-4 no-scrollbar sm:mx-0 sm:px-0">
+              <div className="flex w-max gap-2 pb-1">
+                {categories.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setCategory(c)}
+                    aria-pressed={category === c}
+                    className={cn(
+                      "relative min-h-[36px] whitespace-nowrap rounded-full border px-3.5 text-[13px] font-medium transition-colors",
+                      category === c
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
+                    )}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-region space-y-4 pr-1">
       {/* Live Supabase rewards store — renders only when auth is configured */}
       <LiveRewardsStore />
 
-      {isSupabaseConfigured() && (
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-muted-foreground">Prototype store</h2>
-          <span className="rounded-md border border-dashed px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Demo data — migrates in a later slice
-          </span>
-        </div>
-      )}
-
-      {/* Points banner */}
-      <Card className="flex flex-wrap items-center justify-between gap-4 bg-gradient-to-r from-accent/70 to-accent/20 p-4 sm:p-5">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">Your balance</p>
-          <p className="mt-1 text-2xl font-semibold tabular sm:text-3xl">
-            {formatNumber(customer.points)} <span className="text-base font-normal text-muted-foreground">points</span>
-          </p>
-          <p className="mt-0.5 flex items-center gap-1.5 text-sm text-muted-foreground">
-            Worth approximately ₹{formatNumber(pointsToRupees(customer.points))}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button type="button" aria-label="How point value works"><Info className="size-3.5" /></button>
-              </TooltipTrigger>
-              <TooltipContent>Reward value depends on the offer.</TooltipContent>
-            </Tooltip>
-          </p>
-        </div>
-        <WaysToEarnSheet
-          trigger={<Button variant="secondary" size="sm">See ways to earn</Button>}
-        />
-      </Card>
-
-      {/* Search + sort */}
-      <div className="flex flex-wrap items-center gap-2.5">
-        <SearchInput
-          value={query}
-          onChange={setQuery}
-          placeholder="Search LED, switch, socket, MCB, wire…"
-          className="min-w-[200px] flex-1"
-          aria-label="Search rewards"
-        />
-        <Select value={sort} onValueChange={setSort}>
-          <SelectTrigger className="w-[160px]" aria-label="Sort rewards">
-            <SlidersHorizontal className="size-4 text-muted-foreground" />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {sorts.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
-          </SelectContent>
-        </Select>
-        <Sheet>
-          <SheetTrigger asChild>
-            <Button variant="outline" className="lg:hidden">
-              <Filter /> Filters
-              {activeFilterCount > 0 && <Badge className="ml-1">{activeFilterCount}</Badge>}
-            </Button>
-          </SheetTrigger>
-          <SheetContent side="bottom" className="max-h-[85dvh]">
-            <SheetHeader><SheetTitle>Filters</SheetTitle></SheetHeader>
-            <SheetBody className="pb-8">{filterPanel}</SheetBody>
-          </SheetContent>
-        </Sheet>
-      </div>
-
-      {/* Category tabs */}
-      <div className="-mx-4 overflow-x-auto px-4 no-scrollbar sm:mx-0 sm:px-0">
-        <div className="flex w-max gap-2 pb-1">
-          {categories.map((c) => (
-            <button
-              key={c}
-              onClick={() => setCategory(c)}
-              aria-pressed={category === c}
-              className={cn(
-                "relative min-h-[36px] whitespace-nowrap rounded-full border px-3.5 text-[13px] font-medium transition-colors",
-                category === c
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
-              )}
-            >
-              {c}
-            </button>
-          ))}
-        </div>
-      </div>
-
+      {!isSupabaseConfigured() && (
       <div className="flex gap-6">
         {/* Desktop filter sidebar */}
         <aside className="hidden w-56 shrink-0 lg:block">
-          <div className="sticky top-24 rounded-xl border bg-card p-4">
+          <div className="rounded-xl border bg-card p-4">
             <p className="mb-4 flex items-center gap-2 text-sm font-semibold">
               <Filter className="size-4" /> Filters
               {activeFilterCount > 0 && <Badge className="ml-auto">{activeFilterCount}</Badge>}
@@ -277,13 +278,15 @@ export default function RewardsStorePage() {
               }
             />
           ) : (
-            <motion.div layout className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-4">
+            <motion.div layout className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-4 pb-2">
               {results.map((r, i) => (
                 <RewardCard key={r.id} reward={r} points={customer.points} tier={customer.tier} index={i} />
               ))}
             </motion.div>
           )}
         </div>
+      </div>
+      )}
       </div>
     </div>
   );

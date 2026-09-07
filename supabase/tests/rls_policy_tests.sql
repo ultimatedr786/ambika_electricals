@@ -74,7 +74,7 @@ begin
   return 'NO_ERROR';
 end $$;
 
-select plan(309);
+select plan(311);
 
 -- ---------------------------------------------------------------------------
 -- Tenant isolation & role-scoped reads
@@ -669,6 +669,18 @@ select is(
   'SA5: payments must equal the server-computed total'
 );
 
+-- 'points' is a valid payment_method ENUM member but create_sale never debits
+-- the ledger for it, so it must be refused (regression for the
+-- points-as-sale-payment accounting hole fix).
+select is(
+  extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
+    'select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''[{"name":"x","qty":1,"unit_price_paise":10000}]''::jsonb,
+      ''[{"method":"points","amount_paise":10000}]''::jsonb, null, 0, ''pgtap-sa5-points'')'),
+  '22023',
+  'SA5: points is refused as a sale payment method'
+);
+
 select is(
   extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',
     format('select public.create_sale(''bbbbbbbb-0000-4000-8000-000000000001'',
@@ -831,6 +843,21 @@ select is(
     where idempotency_key = 'pgtap-inv-receive'),
   1::bigint,
   'INV4: one receipt movement despite two calls'
+);
+-- Regression for the replayed-as-string bug: `->>` extraction inside
+-- receive_stock/adjust_stock used to leave `replayed` as a JSON string
+-- ("false"/"true"), which a JS caller's Boolean(row.replayed) always reads
+-- as true. jsonb_typeof must report 'boolean', not 'string'. Reuses the same
+-- idempotency key as the receipt above (now a pure replay), so this adds no
+-- further stock movement and does not disturb the balance reconciliation
+-- checked later in this case.
+select is(
+  extensions.text_as('authenticated', '22222222-2222-4222-8222-222222222222',
+    format('select jsonb_typeof(public.receive_stock(''bbbbbbbb-0000-4000-8000-000000000001'',
+      ''%s'', 5, ''Supplier delivery'', ''pgtap-inv-receive'') -> ''replayed'')',
+      current_setting('app.inv_prod', true))),
+  'boolean',
+  'INV4: receive_stock replayed is a genuine JSON boolean, not a string'
 );
 select is(
   extensions.sqlstate_as('authenticated', '33333333-3333-4333-8333-333333333333',

@@ -16,7 +16,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PasswordField } from "@/components/shared/password-field";
 import { useServices } from "@/lib/services";
 import { createClient } from "@/lib/supabase/client";
-import { getSiteUrl, isDemoAuthEnabled, isSupabaseConfigured } from "@/lib/auth/env";
+import { getSiteUrl, isDemoAuthEnabled, isDemoDevToolsEnabled, isSupabaseConfigured } from "@/lib/auth/env";
 import { safeReturnTo } from "@/lib/auth/redirects";
 import { authErrorMessage, resolveRoleHome } from "@/lib/auth/client-flows";
 
@@ -484,8 +484,8 @@ export function LoginForm({ next, error }: { next?: string | null; error?: strin
         )}
       </div>
 
-      {/* Demo mode selector — never rendered when real auth is configured in production */}
-      {demoEnabled && (
+      {/* Demo mode selector — developer tooling only, never in normal user UI */}
+      {isDemoDevToolsEnabled() && (
         <div className="rounded-xl border border-dashed border-primary/30 bg-primary/[0.03] p-3.5">
           <div className="mb-2.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
             <Sparkles className="size-3.5" />
